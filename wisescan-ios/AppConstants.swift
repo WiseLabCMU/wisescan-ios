@@ -29,6 +29,17 @@ enum AppConstants {
     // MARK: - AppStorage Keys
     enum Key {
         static let uploadURL = "uploadURL"
+        static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
+        static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
+        static let controlPlanePromptedTasks = "controlPlanePromptedTasks" // urgent tasks already alerted (each alerts once; then the to-do list)
+        static let controlPlaneOpenTasks = "controlPlaneOpenTasks"    // the to-do list as of the last sync (JSON), shown while the server can't be reached
+        static let controlPlaneTaskAnswers = "controlPlaneTaskAnswers" // open/decline answers the server hasn't had yet, sent with the next sync
+        static let controlPlaneSyncedSpaces = "controlPlaneSyncedSpaces" // ids of the spaces reported to the control plane (Sync on a space or stitched map)
+        static let controlPlaneAutoSync = "controlPlaneAutoSync"      // which spaces start syncing without a tap: all / new / off (ControlPlaneAutoSync)
+        static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
+        static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
+        static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
+        nonisolated static let controlPlanePasswordWanted = "controlPlanePasswordWanted" // read by ControlPlaneSecret off the main actor; the control plane (base URL) that refused a request for want of a password; tapped Upload and Sync ask for it first
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
@@ -36,8 +47,11 @@ enum AppConstants {
         static let mockCameraImages = "mockCameraImages"
         static let mockDepthMaps = "mockDepthMaps"
         static let privacyFilter = "privacyFilter"
+        static let privacyFilterOffAt = "privacyFilterOffAt"          // when the Privacy Filter was last switched off (seconds since 1970); cleared when it goes back on (PrivacyFilterTimer)
+        static let privacyFilterTimeLimitHours = "privacyFilterTimeLimitHours" // Developer Mode: hours the Privacy Filter may stay off before it turns itself back on; 0 = no limit
         static let mockWearable = "mockWearable"
         static let selectedExportFormat = "selectedExportFormat"
+        static let locationScanFilter = "locationScanFilter"   // a space's scan list: Room / Focus / All (ScanListFilter)
         static let activeMeshColor = "activeMeshColor"
         static let ghostMeshColor = "ghostMeshColor"
         static let metaWearablesFPS = "metaWearablesFPS"
@@ -46,6 +60,7 @@ enum AppConstants {
         static let hideLivePoints = "hideLivePoints"
         static let perfDiagnostics = "perfDiagnostics"
         static let perfSampleUnderDebugger = "perfSampleUnderDebugger"  // Developer Mode: let the stall sampler send SIGUSR1 even when lldb is attached (requires lldb set to pass the signal)
+        static let sweepCoverageLiveReadout = "sweepCoverageLiveReadout"  // Developer Mode: on-screen sweep-coverage counters while recording (shown only with perfDiagnostics also on)
         static let pauseVRCompute = "pauseVRCompute"
         static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
@@ -56,6 +71,7 @@ enum AppConstants {
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
+        static let liteModeNoticeShown = "liteModeNoticeShown"       // the "Lite Mode — No LiDAR" notice was shown (once per install)
         static let rigMeasuredDyDateMs = "rigMeasuredDyDateMs"        // when the rig height was last entered/confirmed, UTC epoch ms — drives the staleness nudge (2026-08-19: a 28.5-inch entry outlived its rig by a day and a half, and poses shipped ~8 cm long with nothing anywhere to say the number had gone stale)
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
@@ -85,6 +101,111 @@ enum AppConstants {
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
 
+    /// Keys this build no longer reads, deleted from the user's defaults on launch.
+    ///
+    /// An orphaned key is inert — nothing reads it — but it outlives the feature that wrote it, and
+    /// a later key that happens to reuse the name would silently inherit a value chosen for
+    /// something else. Written as strings rather than `Key` constants BECAUSE the constants are
+    /// gone: the whole point is that these names exist nowhere else in the app.
+    ///
+    /// An entry can be removed again once no installed build could still be carrying it.
+    private static let retiredDefaultsKeys = [
+        // Retired 2026-08-28 with the coarse/full label toggle: the mesh preview now always names
+        // its RoomPlan boxes with the full vocabulary, so there is no granularity left to persist.
+        "semanticLabelDetail",
+        // Retired 2026-10-25: a copy of the control plane device id. Defaults ride backups, so a
+        // phone restored from another's would have synced as it (DeviceIdentity now falls back to
+        // a file excluded from backups).
+        "controlPlaneDeviceId"
+    ]
+
+    /// Drop every retired key. Cheap, idempotent, and called once from the app's `init`.
+    static func pruneRetiredDefaults() {
+        for key in retiredDefaultsKeys {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    // MARK: - Developer options
+
+    /// Every option in Settings > Developer Mode, with its default.
+    ///
+    /// RULE: a new Developer Mode option goes in here (key and default) in the same change that
+    /// adds its row. This list is all that Restore Default Developer Options and turning Developer
+    /// Mode off reset, so an option missing from it keeps its bench value outside Developer Mode.
+    /// That matters: Keep 360° Originals left on leaves raw equirects on the camera, Mesh
+    /// Classifier left off drops the wall labels registration needs, and the diagnostics switches
+    /// gate on their own keys, so a left-on one keeps costing.
+    ///
+    /// Registered at launch (Scan4DApp.init), so code that reads a key straight from UserDefaults
+    /// gets the right default with no fallback of its own; that is also why a restore can simply
+    /// remove the stored values. Left out on purpose: `developerMode` itself (a restore keeps
+    /// Developer Mode on).
+    ///
+    /// Outside Developer Mode every option here is at its default: turning Developer Mode off
+    /// restores them, and so does every launch with it off (`restoreDeveloperDefaultsOutsideDeveloperMode`),
+    /// which also covers a setting that moved here from everyday Settings with a changed value.
+    static let developerOptionDefaults: [String: Any] = [
+        // Simulation
+        Key.mockIMU: mockIMU,
+        Key.mockCameraImages: mockCameraImages,
+        Key.mockDepthMaps: mockDepthMaps,
+        Key.mockWearable: mockWearable,
+        // 360° and colorize probes
+        Key.colorizeFrom360Faces: colorizeFrom360Faces,
+        Key.keepCameraOriginals: keepCameraOriginals,
+        Key.privacyFilterTimeLimitHours: privacyFilterTimeLimitHours,
+        Key.gpuColorize: gpuColorize,
+        Key.keyframeWeightBonus: keyframeWeightBonus,
+        Key.robustColorMedian: robustColorMedian,
+        // VR, diagnostics and isolation switches
+        Key.hideLivePoints: hideLivePoints,
+        Key.perfDiagnostics: perfDiagnostics,
+        Key.perfSampleUnderDebugger: perfSampleUnderDebugger,
+        Key.sweepCoverageLiveReadout: sweepCoverageLiveReadout,
+        Key.pauseVRCompute: pauseVRCompute,
+        Key.vrBloomEnabled: vrBloomEnabled,
+        Key.memDiagForceReclaim: memDiagForceReclaim,
+        Key.forceRebuildArtifacts: forceRebuildArtifacts,
+        // Capture tuning, moved here from everyday Settings (fewest controls, CONTRIBUTING §3)
+        Key.rawOverlapMax: overlapMax,
+        Key.rawRejectBlur: rejectBlur,
+        Key.semanticLabeling: semanticLabeling,
+        Key.activeMeshColor: activeMeshColor,
+        Key.ghostMeshColor: ghostMeshColor,
+        Key.metaWearablesFPS: metaWearablesFPS,
+        // Capture quality and processing
+        Key.videoFormatIndex: videoFormatIndex,
+        Key.captureAudioEnabled: captureAudioEnabled,
+        Key.meshClassifier: meshClassifier,
+        Key.registerLegacyScans: registerLegacyScans
+    ]
+
+    /// At launch: with Developer Mode off, every developer option goes back to its default. Turning
+    /// Developer Mode off already did that for the options it had then; this catches a setting that
+    /// later moved into Developer Mode from everyday Settings, which a user may have changed and
+    /// could no longer see or change back (Semantic Labeling off blocks every rescan).
+    static func restoreDeveloperDefaultsOutsideDeveloperMode(in defaults: UserDefaults = .standard) {
+        guard !defaults.bool(forKey: Key.developerMode) else { return }
+        restoreDeveloperDefaults(in: defaults)
+    }
+
+    /// Restore Default Developer Options, which is also what turning Developer Mode off does:
+    /// removes every developer option's stored value, so each reads its registered default again.
+    static func restoreDeveloperDefaults(in defaults: UserDefaults = .standard) {
+        for key in developerOptionDefaults.keys {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    /// True when every developer option reads its default, so a restore would change nothing.
+    static func developerOptionsAreDefault(in defaults: UserDefaults = .standard) -> Bool {
+        developerOptionDefaults.allSatisfy { key, value in
+            guard let stored = defaults.object(forKey: key) else { return true }
+            return (stored as AnyObject).isEqual(value)
+        }
+    }
+
     // MARK: - Default Values
     static var isTestFlight: Bool {
         Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
@@ -93,6 +214,11 @@ enum AppConstants {
     static var uploadURL: String {
         isTestFlight ? "https://wiselambda4.lan.cmu.edu/wisescan-uploads/" : ""
     }
+    /// The lab's control plane (scan4d-server), on TestFlight only, like the upload URL: App Store
+    /// and Xcode builds start with none. A host the user typed, or cleared, stays theirs.
+    static var controlPlaneHost: String {
+        isTestFlight ? "https://wiselambda4.lan.cmu.edu" : ""
+    }
     static let overlapMax: Double = 60.0                           // 60%: fewer redundant motion frames now that sharp stills carry texture detail (photogrammetry overlap rule of thumb)
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false
@@ -100,6 +226,12 @@ enum AppConstants {
     static let mockCameraImages: Bool = false
     static let mockDepthMaps: Bool = false
     static let privacyFilter: Bool = true
+    /// Switched off, the Privacy Filter turns itself back on after this many hours (field
+    /// report 2026-11-11: it was being left off by mistake and scans caught too many people).
+    /// Developer Mode can pick another limit from `privacyFilterTimeLimitChoices`.
+    static let privacyFilterTimeLimitHours: Int = 24
+    /// The Developer Mode choices, in hours; 0 = no limit.
+    static let privacyFilterTimeLimitChoices: [Int] = [12, 24, 168, 0]
     static let mockWearable: Bool = false
     static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
     static let activeMeshColor: String = "Green"
@@ -109,9 +241,13 @@ enum AppConstants {
     static let hideLivePoints: Bool = false
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let perfSampleUnderDebugger: Bool = false   // Developer Mode: stall sampler fires under a debugger too (lldb must pass SIGUSR1, else it pauses)
+    static let sweepCoverageLiveReadout: Bool = false  // Developer Mode: live sweep-coverage readout while recording; a Perf Diagnostics sub-option, inert unless that is on too
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
     static let vrBloomEnabled: Bool = false     // Developer Mode: VR point-cloud bloom post-process (off by default — device A/B found it unmissed with live points visible; helps most when Hide Live Points is on)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
+    /// Mesh preview: whether the semantic overlays are labelled with the consolidated display
+    /// classes or with the full RoomPlan vocabulary `roomplan.json` already stores. Coarse by
+    /// default — the richer set is opt-in, so nothing about an existing preview changes until asked.
     /// Developer Mode, OFF by default even in dev. When on, [MemDiag] teardown brackets call
     /// `malloc_zone_pressure_relief` before measuring footprint, forcing the allocator to return
     /// free-list pages to the OS so a teardown free-delta reflects actually-reclaimed memory rather
@@ -202,7 +338,7 @@ enum AppConstants {
     // hand–eye refinement replaces these per rig profile later)
     static let rigRodHeightMeters: Float = 0.75    // rod length (m) from the phone camera to the 360° lens when the operator has NOT measured the rig. ALONG THE ROD, the same axis the operator tapes and the same axis RigProfile.offsetPhone stores — no frame conversion anywhere. 1.0 m was a guess no field rig has ever matched (every measured monopod: 0.70-0.79 m), which put the truth on the edge of the unmeasured search box
     static let rigYawOffsetDegrees: Float = 0      // pano-center (camera-body forward) yaw relative to the phone's horizontal forward; 0 = lenses aligned with the phone
-    static let equirectFaceSizeMax = 2048          // cube-face edge cap (native density is equirectWidth/4; 11K Theta X stills would yield 2752 — capped for JPEG size/memory)
+    static let equirectFaceSizeMax = 2752          // cube-face edge MEMORY cap (not the density target). The equator-matched size is equirectWidth/π (a gnomonic face's center sits on the equator, where equirect angular density W/2π px/rad is real detail; W/4 under-sampled it by ~21% linear). 2752 admits the Z1 (2139) and the X's real 8192-wide equirect (2608) in full and clamps only a hypothetical true-11K source (3504). Sized against the #65 headroom audit; faces are a transient off-hot-path export cost.
     static let equirectFaceDecodeMax = 8192        // staged-equirect decode cap for face sampling (8192×4096 RGBA ≈ 134 MB transient, per-still pooled; width/4 already saturates the face cap)
 
     // MARK: - 360° Rig Calibration (markerless mesh-edge solver — see docs/design/still-source-360.md)
@@ -296,9 +432,9 @@ enum AppConstants {
     ///
     /// Distribution of combined displacement over those 41: p50 7.8 mm, p90 14.5,
     /// p95 17.5, max 24.9. 18 mm flags 1 in 41 — about one warning every eight scans —
-    /// and is the old 2.0° gate re-expressed on a 0.72 m rod (1.42°), which is ~23 px
-    /// on a 2048 cube face at 1 m. Below that the sway is smaller than the pose error
-    /// the solve carries anyway.
+    /// and is the old 2.0° gate re-expressed on a 0.72 m rod (1.42°), which is ~29 px
+    /// on a 2608 cube face at 1 m (~23 px on the former 2048 face). Below that the sway
+    /// is smaller than the pose error the solve carries anyway.
     static let thetaSwayWarnCombinedMeters: Float = 0.018
     /// Solve-side rejection is deliberately far looser than the operator warning: a
     /// warning costs a re-shoot, but dropping a still costs the solve a whole viewpoint,
@@ -340,11 +476,10 @@ enum AppConstants {
     // from plausible poses. A monopod rig cannot physically be outside these ranges.
     static let calibrationBoundRodM: Float = 0.3                       // along-rod half-range (m) around the anchor when the user hasn't MEASURED the rig — the rod length is the one thing we genuinely don't know then
     static let calibrationBoundAcrossRodM: Float = 0.13                // half-range (m) on each of the two axes ACROSS the rod. Covers real clamp offsets (a few cm) AND the rod not being exactly along the phone's −x̂: ±0.13 m at a 0.72 m rod is a ~10° cone, wider than every inclinometer reading taken on this rig
-    static let calibrationGravityFitMaxDeg: Float = 4.0                 // max mean angular residual (deg) of the one-constant-rotation fit to the camera's per-still gravity before its rod direction is distrusted. Was 3.0, and two consecutive healthy scans (2026-08-19/20: fits 3.12° and 3.03°, solves at 0.8°/1.5° yaw spread, rod direction agreeing with history at 9-11° off −x̂) were rejected into the wide ±13cm box for being a whisker over — the field range on a rigid rig runs to ~3.1°, and a rig that actually shifted mid-scan shows up far past 4
+    static let calibrationGravityFitMaxDeg: Float = 4.0                 // max mean angular residual (deg) of the one-constant-rotation fit to the camera's per-still gravity before its rod direction is distrusted. Was 3.0, and two consecutive healthy scans (2026-08-19/20: fits 3.12° and 3.03°, solves at 0.8°/1.5° yaw spread, rod direction agreeing with history at 9-11° off −x̂) were rejected into the wide ±13cm box for being a whisker over — the field range on a rigid rig runs to ~3.1°, and a rig that actually shifted mid-scan shows up far past 4. Revisited 2026-09-01 against the 11-bundle archive (tools/rigcal-ab/acrossrod.py): rigid-rig means run 0.7-1.9 deg with the two 3.0-3.1 outliers that prompted the raise — 4.0 stands with real margin on both sides
     static let calibrationRodDirectionMaxOffDeg: Float = 25             // sanity limit (deg) on how far the MEASURED rod direction may sit from the assumed −x̂ before it is rejected as a bad fit rather than believed. Measured 7.6° on the field rig
     static let calibrationMeasuredAcrossRodM: Float = 0.07              // half-range (m) across the rod when its DIRECTION was measured from the camera's own accelerometer, not assumed. calibrationBoundAcrossRodM's 0.13 is mostly a ~10° cone of ignorance about where the rod points; with the direction measured to a few degrees, what is left is real clamp geometry plus the fit's own slop
     static let calibrationMeasuredRodHalfM: Float = 0.03               // along-rod half-range (m) when the operator HAS measured. GROUND-TRUTHED 2026-08-19: a field re-measure corrected the tape from 0.724 to 0.686 m, giving truth against three healthy solves — all landed +8.1 to +10.5 cm ABOVE it, riding up even though truth sat near the BOTTOM of the ±5 cm box, on both the X and the Z1. The cost's along-rod content is bias (the documented +pull), not signal, so the window is tape+optical-centre slop only. A rail on this axis now MEANS 're-measure the rod' — with ±3 cm, every scan that day would have railed and named the stale tape, which is exactly how the error was eventually found by hand
-    static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
     static let vioDegradedTripSeconds: TimeInterval = 2.5    // VIO guard: tracking continuously degraded (limited/relocalizing/unavailable) this long mid-scan → halt
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
     static let arIdleTeardownSeconds: TimeInterval = 60      // battery: seconds on a non-capture tab before pausing the AR session (camera/sensors off); resumed on return. Long enough that rapid successive scans stay warm.
@@ -356,6 +491,10 @@ enum AppConstants {
     static let captureIntegrityMinFrames: Int = 4            // min captured frames before judging modality completeness (too few to be meaningful below this)
     static let captureIntegrityMinFraction: Double = 0.5     // a modality (depth/confidence) present in fewer than this fraction of frames = grossly incomplete capture → warn the user
     static let jpegCompressionQuality: CGFloat = 0.85        // JPEG quality for captured frames
+    // Flame3D export (Flame3DExport; mirrors tools/scan4d-to-flame3d's converter defaults)
+    static let flame3dMaxImageLongEdge: Int = 1920           // cap on the exported long edge; stills are resized to the stream size under it
+    static let flame3dAspectTolerance: Double = 0.01         // a still within 1% of the stream's aspect is resized to it, else left out (SAM3 needs one resolution)
+    static let flame3dJPEGQuality: CGFloat = 0.95            // re-encode quality for resized stills
     static let blurWarningTimeout: TimeInterval = 1.5        // seconds before blur warning auto-dismisses
     static let consecutiveBlurThreshold: Int = 5             // blurred frames before warning triggers
     static let motionBlurVelocity: Float = 0.5               // m/s threshold for motion blur detection
@@ -427,6 +566,7 @@ enum AppConstants {
     static let coachNearDepthSustainSeconds: TimeInterval = 4  // obstruction must persist this long before the coach warns — a hand passing the lens must not fire it
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
     static let captureAudioEnabled: Bool = true                // default for shutter-click + chime sounds
+    static let videoFormatIndex: Int = 0                       // Developer Mode video format: 0 = Auto (no override); N = force supportedVideoFormats[N-1]
 
     // MARK: - Capture Quality Constants
     static let motionBlurAngularVelocity: Float = 0.5          // rad/s (~30°/s) — rotational velocity above which frames are rejected as blurry
@@ -441,6 +581,10 @@ enum AppConstants {
     static let stillnessHapticIntensity: CGFloat = 0.6         // soft haptic strength on entering confirmed stillness
     static let captureFlashOpacity: Double = 0.5               // peak opacity of the white shutter flash on keyframe capture
     static let captureFlashDuration: TimeInterval = 0.35       // fade-out duration of the shutter flash
+    static let autoStillFlashOpacity: Double = 0.25            // peak of the softer flash for automatic room and focus-scan stills (up to ~2/s)
+    static let autoStillFlashDuration: TimeInterval = 0.2      // fade-out of the automatic-still flash
+    static let captureFlashDimmedOpacity: Double = 0.1         // every flash's peak with Accessibility > Dim Flashing Lights on
+    static let captureFlashDimmedDuration: TimeInterval = 0.5  // slower, gentler fade with Dim Flashing Lights on
     static let photoCoverageMaxDistance: Float = 4.0           // m — max distance a keyframe photo credibly captures texture detail
     static let photoTintColor = SIMD4<Float>(1.0, 0.72, 0.2, 1.0) // amber overlay marking depth-covered-but-unphotographed mesh
     static let photoTintAlpha: CGFloat = 0.28                  // opacity of the amber "depth only" tint
@@ -453,9 +597,118 @@ enum AppConstants {
     static let photoCoverageDebtMinVoxels: Int = 40            // min mesh voxels before the coverage-debt coach tip can fire (too little geometry below this)
     static let photoCoverageDebtFraction: Double = 0.3         // coach nudges "pause for photos" while photo coverage is below this fraction of mesh
     static let photoCoverageStandpointCell: Float = 0.5        // m — camera-position quantization for the per-voxel standpoint (parallax) mask
+
+    // ── AR still capture (EXPERIMENT: the capture-only branch of a rescan, see ARStillCaptureSession) ──
+    static let arStillFolder = "ARStillCaptures"               // Documents/<folder>/ — capture directories and their zips
+    static let arStillMaxExposureSeconds: Double = 1.0 / 120   // longest exposure auto exposure may use on ARKit's camera (activeMaxExposureDuration, clamped to the format); AE raises ISO instead. 1/120 integrates one 120 Hz mains-flicker cycle. 0 = no cap. An uncapped 1/30 s was blurry.
+    static let arStillMinIntervalSeconds: TimeInterval = 0     // hard floor between stills regardless of motion (0 = none)
+    static let arStillMaxIntervalSeconds: TimeInterval = 1.0   // also fire after this long without a still however little the view changed: a pause yields one still per second (unspaced, a pause gave 3-5 near-identical stills). 0 = one still per pause.
+    static let arStillIMUUpdateInterval: TimeInterval = 0.0001 // requested CoreMotion interval, far below any sensor's minimum, so the gyro and accelerometer run at the hardware maximum (CoreMotion clamps)
+    static let arStillStatsRefreshSeconds: TimeInterval = 0.5  // debug-panel counters refresh
+    static let arStillViewpointThresholdDeg: Double = 6         // next still once the view has rotated this much, OR a sideways move subtends this much at the scene (pose + LiDAR depth, so sidesteps count)
+    static let arStillJPEGQuality: CGFloat = 0.95              // still encode quality (the ARKit still arrives as raw YCbCr; we encode it)
+    static let arStillMaxPendingEncodes: Int = 2               // hold new stills while this many 12MP encodes are queued (each holds ~18 MB until written)
+    static let arStillGateMinConfidence: UInt8 = 1             // LiDAR confidence floor for the depth the gates use (0 low, 1 medium, 2 high)
+    static let arStillGateDepthPercentile: Double = 0.25       // gates use the nearer part of the scene: near content smears and shifts most
+    static let arStillVelocityWindowSeconds: TimeInterval = 0.1 // device velocity = pose difference over this window (ARKit pose jitter dominates shorter windows)
+    static let arStillDepthHoldSeconds: TimeInterval = 10      // through a scene-depth dropout the gates hold the last good near depth this long (keeps the sidestep and parallax terms), then fall back to rotation only
+    static let arStillDepthRequestCooldownSeconds: TimeInterval = 2 // while depth is missing, re-check the live configuration this often and re-request scene depth if a re-run dropped it
+    static let arStillGyroPeakWindowSeconds: TimeInterval = 0.05 // the blur gate also takes the gyro's peak rate over this window (the pose term's 0.1 s average smooths hand shake out). iPhone office replay: stills passing the gate that turned too fast at capture, 30% pose-only -> 21% with a 30 ms peak, 7% at 50 ms, 6% at 100 ms
+    static let arStillGyroHistoryCapacity: Int = 512           // gyro samples kept for the gate's peak and the per-still rate at capture (~5 s at 100 Hz; a still's completion lands within ~0.7 s of its exposure)
+    static let arStillBlurBudgetRad: Double = 0.0009           // blur gate on predicted IMAGE MOTION during the exposure, as an ANGLE (the larger of the pose term, rotation and translation as vectors at centre + corners at the near depth, and the gyro peak x exposure). 0.9 mrad = 3 px at the 12MP still's 3,346 px focal. Angular so a 48MP still is held to the same real sharpness (6 px) instead of silently twice as strict. The first capture's sharp stills moved up to 2.8 px (p90); replaying its motion, 3 px fired every 1.37 s vs 2.05 s for the original 2 px magnitude sum.
+    // Short exposure (both capture modes): instead of holding the exposure at arStillMaxExposureSeconds (1/120),
+    // shorten it to whatever reaches this ISO in the current light. The gate reads the real exposure, so it loosens in proportion.
+    // In dim light the cap settles back on 1/120. iPhone office capture: blur-free at ~2.4x the stills/s of a fixed 1/120, no banding
+    // found (daylight room); costs fine texture at high ISO (denoiser).
+    // Caveat: 1/120 integrates one full 120 Hz mains-flicker cycle; shorter exposures can band or pulse under flickering LED/fluorescent light.
+    static let arStillShortExposureISOCeiling: Double = 800   // the first capture's noise grew only as ISO^0.29 (0.45 -> ~1.1 of 255 over ISO 50-700; the ISP denoises)
+    static let arStillShortExposureFloorSeconds: Double = 1.0 / 500 // never shorter: at 1/500 the 3 px budget already allows ~26 deg/s; spacing and walking pace bind first
+    static let arStillShortExposureUpdateSeconds: TimeInterval = 0.3 // re-evaluate the cap this often; changes under 10% are ignored
+    // ── Room scan automatic stills (docs/design/capture-modes.md) ── replace the video-stream frames
+    static let roomScanAutoStills = true                       // 12MP stills fire on their own (blur gate + spacing); no stream frames are saved. The rig's tap still stays.
+    static let roomStillSpacingDeg: Double = 15                // next still once the view turned this much, or a sideways move subtends this at the near depth (focus Splat: 5)
+    static let roomStillWarmupSeconds: TimeInterval = 10       // none in the first seconds of recording: RoomPlan + segmentation model loads (the bring-up storm, capture-quality-triage.md)
+    static let roomStillWalkMeters: Double = 0.5               // ...or after walking this far (straight down a hallway turns nothing and has no parallax)
+    static let roomStillMinIntervalSeconds: TimeInterval = 0.5 // between automatic requests (a blur-rejected still saves nothing, so this times requests)
+    static let roomStillHotMinIntervalSeconds: TimeInterval = 2 // at thermal state serious or worse
+    static let roomStillSlowEncodeMs: Double = 400             // a 12MP encode slower than this means CPU contention...
+    static let roomStillBackoffSeconds: TimeInterval = 3       // ...or a frame gap: hold automatic stills this long
+    static let roomStillFrameGapSeconds: TimeInterval = 0.3    // ARKit frame timestamps jumping more than this between 0.1 s capture ticks = a stall
+
+    // ── Focus scan (docs/design/capture-modes.md) ── starting values per detail level, to tune from field captures
+    static let focusCheckSpacingDeg: Double = 25               // Check: next still once the view of the region changed this much (turn or parallax)
+    static let focusDetailSpacingDeg: Double = 12
+    static let focusSplatSpacingDeg: Double = 5                // Splat: the AR Capture experiment ran 6 deg; the iPhone replay favoured 4
+    static let focusCheckTargetStills: Int = 5                 // Check finishes by itself here ("which tools are on the table")
+    static let focusDetailTargetStills: Int = 30
+    static let focusSplatTargetStills: Int = 150
+    static let focusRegionMaxSizeM: Float = 10                 // a region larger than this on any side is rejected (a room scan's job)
+    static let focusRegionNearPlaneM: Double = 0.05            // a box corner this close to the camera (or behind it) means "up against the box"
+    static let focusRegionCentreMargin: Double = 0.1           // the box centre must project at least this far (fraction of the image) inside every edge
+    static let focusMinFrameCoverage: Double = 0.04            // and the box must fill at least this share of the frame (else "move closer"); not applied up close or inside the box
+    static let focusAimRayOffset: Double = 0.2                 // "looking at the region" = LiDAR depth along the image centre and 4 rays this far (fraction of the image) toward the corners lands in the box
+    static let focusAimWindowRadius: Int = 2                   // each aim point is the median of a (2r+1)^2 window of confident depth pixels
+    static let focusRegionAimMarginM: Float = 0.05             // the box counts this much larger for the aim test (surfaces on its faces)
+    static let focusCoverageAzimuthBins: Int = 12              // coverage dial: 30-degree sectors around the region
+    static let focusCoverageElevationEdgesDeg: [Double] = [20, 50] // and three rings: low (< 20 deg above the region's middle), mid, high (>= 50)
+    static let focusRegionURLScheme = "scan4d"                 // scan4d://focus-region?data=<base64url focus_region.json> (Custom-Info.plist CFBundleURLTypes)
+    static let focusRegionURLHost = "focus-region"
+    static let focusCaptureFolder = "focus_capture"            // a focus scan's still-capture dump, inside its scan folder
+    static let focusRegionFilename = "focus_region.json"       // its region, beside it (and at the export zip's root)
+    static let focusThumbnailMaxPixel: Int = 640               // card thumbnail: the best still, downsampled during decode
+    static let focusThumbnailIdealCoverage: Double = 0.35      // best still = the sharp one whose region share of the frame is nearest this
+    static let focusThumbnailJPEGQuality: CGFloat = 0.85
+    static let focusPrivacyWorkingMaxPixel: Int = 1024         // export person check: Vision runs on a decode this size (its model's working scale)
+    static let focusPrivacyDilateRadiusPx: Float = 24          // person mask grown by this many full-resolution pixels before pixelation (12MP stills)
+    static let focusPrivacyPixelateScale: Float = 60           // pixelation block size at 12MP (the 3MP frame pass uses 40)
+    // Focus scan HUD and AR box
+    static let focusHUDTopPadding: CGFloat = 96                // below the capture view's top status pills
+    static let focusHUDDialSize: CGFloat = 76
+    static let focusHUDBackgroundOpacity: Double = 0.6
+    static let focusHUDDialHoleFraction: CGFloat = 0.3         // the dial's empty middle, as a share of its radius (the region sits there)
+    static let focusHUDDialBoxFraction: CGFloat = 0.45         // the region square drawn in that middle, as a share of the hole
+    static let focusHUDDialGap: CGFloat = 1.5                  // points between rings
+    static let focusHUDDialGapDeg: Double = 2                  // degrees between sectors
+    static let focusHUDEmptyCellOpacity: Double = 0.18
+    static let focusHUDFilledCellMinOpacity: Double = 0.45     // a cell with one still; full green at its share of the target
+    static let focusHUDDialDotSize: CGFloat = 7                // the camera's current direction
+    static let focusBoxEdgeThicknessM: Float = 0.006           // AR wireframe edge of the region box
+    static let focusPhotoGridMinCell: CGFloat = 96             // focus scan photo grid
+    static let focusPhotoGridSpacing: CGFloat = 6
+    static let focusPhotoGridMaxPixel: CGFloat = 300
+    static let focusPhotoPagerMaxPixel: CGFloat = 2048         // full-screen still, downsampled to about screen size
+    static let focusStillUprightAspect: CGFloat = 0.75         // a 4:3 still held upright (portrait)
+    static let focusCardInsetSize: CGFloat = 64                // the room scan's preview in a focus scan's card
+    // Focus region editor (draw the box on a room scan's mesh)
+    static let focusRegionObjectMarginM: Float = 0.1           // a RoomPlan object's box grows by this on each side...
+    static let focusRegionObjectHeadroomM: Float = 0.4         // ...and this upward, for what sits on it (tools on a table)
+    static let focusRegionDefaultSizeM = SIMD3<Float>(0.8, 0.6, 0.8) // box dropped on a mesh tap
+    static let focusRegionDropSinkM: Float = 0.05              // that box's bottom sits this far below the tapped surface
+    static let focusRegionMinSizeM: Float = 0.1
+    static let focusRegionEditorMaxSizeM: Float = 4            // slider range; a region over this is a room scan's job
+    static let focusRegionEditorMoveRangeM: Float = 1          // position sliders move the box this far from where it was placed
+    static let focusEditorPanelOpacity: Double = 0.75
+    static let focusEditorLabelWidth: CGFloat = 96
+    static let focusEditorValueWidth: CGFloat = 64
+    static let focusEditorObjectOpacity: CGFloat = 0.12        // RoomPlan objects as faint tap targets
+    static let focusEditorRegionOpacity: CGFloat = 0.22
+    static let focusEditorEdgeThicknessM: Float = 0.01
+    static let focusEditorMinFramingM: Float = 2               // editor camera frames at least this much
+    static let focusEditorCameraRise: Float = 0.6              // camera placed this many room spans above the centre...
+    static let focusEditorCameraBack: Float = 0.8              // ...and this many back
+    static let exposureCapChangeTolerance: Double = 0.1       // CaptureExposurePolicy: a new short-exposure target within this fraction of the applied cap is ignored
+    static let exposureCapReapplyTolerance: Double = 0.02      // CaptureExposurePolicy: the device's cap drifted further than this from what was applied -> a session re-run reset it; re-apply
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints
+    static let sweepCoverageCellSize: Float = 0.5              // m — sweep-coverage cell (room-relocalization profile; finer 0.1-0.2 m guidance is a constant change)
+    static let sweepCoverageMaxHz: Double = 5.0                // max sweep-coverage integrations per second (frames above this rate are dropped)
+    static let sweepCoverageRayColumns: Int = 20               // depth-ray grid columns per frame (20×15 = 300 rays/frame)
+    static let sweepCoverageRayRows: Int = 15                  // depth-ray grid rows per frame
+    static let sweepCoverageMaxRange: Float = 5.0              // m — rays longer than this are truncated: free space to the cap, no surface
+    static let sweepCoverageMinDepth: Float = 0.1              // m — depth at or below this is invalid (sensor floor / zero fill)
+    static let sweepCoverageMinConfidence: UInt8 = 1           // skip ARConfidenceLevel.low only — a High-only filter blanked the cloud under thermal duty-cycling (Shaders/PointCloud.metal:123-128)
+    static let sweepCoverageLogEveryUpdates: Int = 25          // emit a sweep-coverage diagnostic line every N integrated updates
     static let keyframeFrustumDepth: Float = 0.25             // m — length of the still-capture frustum wedge in the preview
     static let keyframeStillColor = SIMD4<Float>(0.2, 0.85, 1.0, 1.0)  // cyan — sharp still (keyframe) capture markers
     static let keyframeMotionColor = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // amber — motion (sweep) frame markers
@@ -499,6 +752,22 @@ enum AppConstants {
     // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
     static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
     static let thetaStatusPollInterval: TimeInterval = 0.4       // /osc/commands/status poll cadence while a capture is inProgress
+
+    // MARK: - Control plane (scan4d-server)
+    static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync
+    static let controlPlaneRequestTimeoutS: TimeInterval = 15
+    static let controlPlaneUploadBypassS: TimeInterval = 60      // after the control plane is unreachable, exports go straight to the Upload URL this long
+    static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (tens of MB)
+    static let controlPlaneSendPackages = true                   // map packages go up with the sync unless turned off
+    static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
+    static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
+    static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
+
+    // MARK: - Export uploads (background URLSession, ExportUploader)
+    static let exportUploadSessionId = "edu.cmu.wiselab.wisescan-ios.export-upload" // stable: iOS reattaches a relaunched app's transfers by it
+    static let exportUploadResourceTimeoutS: TimeInterval = 3600 // give up after this long in total; matches scan4d-server's grant lifetime (SCAN4D_EXPORT_URL_TTL_S default), past which a retry is refused anyway
+    static let exportUploadProgressStep: Double = 0.01           // write the scan's progress only when it moves this much (each write is a SwiftData change)
+    static let exportUploadPendingDirectory = "PendingUploads"   // Application Support subfolder holding exports until their transfer ends
 }
 
 // MARK: - Semantic View Mode
@@ -536,13 +805,16 @@ enum SemanticViewMode: String, CaseIterable {
     var showFills: Bool { self == .semanticOnly }
 }
 
-/// Four-tier toggle for capture-pose frustum markers in the mesh preview.
-/// Mirrors `SemanticViewMode`'s cycle-button pattern; defaults to hidden so the preview
-/// stays clean until the user opts in. The `.equirectFaces` tier is skipped for scans
-/// without 360° stills (controlled by `next(hasEquirects:)`).
+/// Capture-pose frustum markers in the mesh preview, hidden by default so the preview stays
+/// clean until the user opts in. Everyone gets one on/off toggle between `.none` and `.photos`
+/// (where each photo was taken: stills and 360° stills, `photoPositionsToggled`). Developer Mode
+/// cycles every tier with `next(hasEquirects:)`, which skips `.equirectFaces` for scans without
+/// 360° stills; motion frames are hundreds of wedges and are only there.
 enum KeyframeMarkerMode: String, CaseIterable {
     /// No capture markers.
     case none
+    /// Every photo: sharp stills and 360° stills (the everyday "photo positions" toggle).
+    case photos
     /// Sharp still (keyframe) capture poses only.
     case stills
     /// 360° equirect sphere markers (one translucent sphere + forward arrow per still).
@@ -556,6 +828,7 @@ enum KeyframeMarkerMode: String, CaseIterable {
     var iconName: String {
         switch self {
         case .none:          return "camera.metering.none"
+        case .photos:        return "camera.metering.partial"
         case .stills:        return "camera.metering.partial"
         case .equirectFaces: return "pano"
         case .motion:        return "camera.metering.center.weighted"
@@ -567,6 +840,7 @@ enum KeyframeMarkerMode: String, CaseIterable {
     func next(hasEquirects: Bool) -> KeyframeMarkerMode {
         switch self {
         case .none:          return .stills
+        case .photos:        return .motion
         case .stills:        return hasEquirects ? .equirectFaces : .motion
         case .equirectFaces: return .motion
         case .motion:        return .all
@@ -574,9 +848,12 @@ enum KeyframeMarkerMode: String, CaseIterable {
         }
     }
 
-    var showStills: Bool { self == .stills || self == .all }
+    /// The everyday toggle: off, or every photo's position.
+    var photoPositionsToggled: KeyframeMarkerMode { self == .none ? .photos : .none }
+
+    var showStills: Bool { self == .stills || self == .photos || self == .all }
     var showMotion: Bool { self == .motion || self == .all }
-    var showEquirectFaces: Bool { self == .equirectFaces || self == .all }
+    var showEquirectFaces: Bool { self == .equirectFaces || self == .photos || self == .all }
 }
 
 /// Which GEOMETRY the mesh preview draws — an axis ORTHOGONAL to `SemanticViewMode` (which
@@ -750,6 +1027,243 @@ enum SemanticClass: String, CaseIterable, Codable {
         case "window":           return .window
         default:                 return .none
         }
+    }
+}
+
+// MARK: - Rich (Unconsolidated) RoomPlan Categories
+
+/// The RoomPlan category vocabulary EXACTLY as `roomplan.json` stores it — 5 surfaces and 16
+/// objects, unconsolidated. `RoomPlanExporter.categoryString` / `objectCategoryString` write these
+/// strings; the raw values here are those strings, so decoding is `init(rawValue:)` and nothing
+/// re-spells them.
+///
+/// `SemanticClass` is the display-level CONSOLIDATION of this set (16 object categories collapse
+/// into 4 classes, 12 of them into `.fixture` alone). That consolidation is what the preview has
+/// always rendered — the mesh preview draws and names boxes from THIS set, and the consolidation
+/// survives only as the palette's anchor (`fullDetailColor`) and as the coarse grouping the tap
+/// read-out names.
+///
+/// A category this build does not know — a future RoomPlan release, or the exporter's `"unknown"`
+/// fallback — parses to nil. Nothing changes for those: their coarse class is `.none` and
+/// `buildRoomPlanOutlines` already skips `.none`.
+///
+/// `nonisolated`: `MeshPreviewView.buildRoomPlanOutlines` is a `nonisolated static func` and reads
+/// `init(rawValue:)`, `allCases` and `.floor` from there, and this project builds with
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — so an unannotated declaration would be implicitly
+/// `@MainActor`. The remaining members are only reached on the main actor today; they are
+/// non-isolated because the type is. Same rationale as `AppConstants.meshSubdivisionMaxFaces`.
+nonisolated enum RoomPlanCategory: String, CaseIterable, Codable {
+    // Surfaces — RoomPlanExporter.categoryString
+    case wall, floor, door, window, opening
+    // Objects — RoomPlanExporter.objectCategoryString
+    case table, chair, sofa, bed, storage, refrigerator, stove, sink
+    case washerDryer = "washer_dryer"
+    case dishwasher, oven, fireplace, television, bathtub, toilet, stairs
+
+    /// Human-readable name for the preview legend and the tap read-out. NOT
+    /// `rawValue.capitalized`: `washer_dryer` has to read as "Washer / Dryer", not "Washer_dryer".
+    var displayName: String {
+        switch self {
+        case .wall:         return "Wall"
+        case .floor:        return "Floor"
+        case .door:         return "Door"
+        case .window:       return "Window"
+        case .opening:      return "Opening"
+        case .table:        return "Table"
+        case .chair:        return "Chair"
+        case .sofa:         return "Sofa"
+        case .bed:          return "Bed"
+        case .storage:      return "Storage"
+        case .refrigerator: return "Refrigerator"
+        case .stove:        return "Stove"
+        case .sink:         return "Sink"
+        case .washerDryer:  return "Washer / Dryer"
+        case .dishwasher:   return "Dishwasher"
+        case .oven:         return "Oven"
+        case .fireplace:    return "Fireplace"
+        case .television:   return "Television"
+        case .bathtub:      return "Bathtub"
+        case .toilet:       return "Toilet"
+        case .stairs:       return "Stairs"
+        }
+    }
+
+    /// The display class this category consolidates into.
+    ///
+    /// Same mapping `SemanticClass.fromSurfaceCategory` / `fromObjectCategory` already apply to the
+    /// same strings — stated here as well so the full vocabulary knows which base colour it hangs
+    /// off. The two are held to agreement by test (`RoomPlanLabelTests`) rather than by one
+    /// calling the other, because those two functions are domain-scoped (a surface named "table" is
+    /// `.none` to them) and routing them through this enum would quietly widen them.
+    var coarseClass: SemanticClass {
+        switch self {
+        case .wall:            return .wall
+        case .floor:           return .floor
+        case .door, .opening:  return .door    // openings treated as door-like for rendering
+        case .window:          return .window
+        case .table:           return .table
+        case .chair, .sofa, .bed: return .seat
+        case .storage, .refrigerator, .stove, .sink, .washerDryer, .dishwasher,
+             .oven, .fireplace, .television, .bathtub, .toilet, .stairs: return .fixture
+        }
+    }
+
+    /// Every rich category consolidating into `cls`, in `allCases` order.
+    ///
+    /// A category's INDEX in this list drives its derived shade, so the order IS the palette:
+    /// reordering `allCases` reshuffles the shades within a group (index 0 keeps the base colour
+    /// either way). `.ceiling` returns empty — RoomPlan has no ceiling category at all, which is
+    /// what the user guide's dimmed "Not yet supported by RoomPlan" row already says.
+    static func categories(in cls: SemanticClass) -> [RoomPlanCategory] {
+        allCases.filter { $0.coarseClass == cls }
+    }
+
+    // MARK: Derived palette
+
+    /// Widest hue window (in 0…1 hue units, spread ±half) a coarse group may occupy. `.fixture`
+    /// holds 12 categories; unbounded widening would walk them out of purple and into the blue that
+    /// means "wall", so the window is capped and the remaining separation comes from saturation and
+    /// value instead.
+    static let fullDetailMaxHueSpan: Float = 0.24
+    /// Hue window for a two-member group.
+    static let fullDetailBaseHueSpan: Float = 0.06
+    /// Extra hue window per member beyond the second — the window WIDENS with group size rather
+    /// than the step being fixed, so a 12-way split is not reduced to invisible increments.
+    static let fullDetailHueSpanGrowth: Float = 0.02
+
+    /// This category's colour at full detail: the coarse class's colour as the anchor, with
+    /// same-group siblings fanned out around it.
+    ///
+    /// The anchor is the point. The user guide's static legend and every existing screenshot teach
+    /// "blue = wall, purple = fixture", so a fixture must still read purple at full detail — only
+    /// the shade separates a stove from a sink. 21 freshly invented colours would have broken that
+    /// language for no gain.
+    ///
+    /// Pure and deterministic: a function of the category's index within its coarse group, nothing
+    /// else. Index 0 returns the base colour byte for byte, so a single-member group (wall, floor,
+    /// table, window) is unchanged from what ships today, at either detail.
+    var fullDetailColor: SIMD4<Float> {
+        let cls = coarseClass
+        let group = Self.categories(in: cls)
+        guard let index = group.firstIndex(of: self) else { return cls.color }
+        return Self.derivedShade(base: cls.color, index: index, groupCount: group.count)
+    }
+
+    /// SwiftUI colour for the full-detail legend swatch and the tap read-out.
+    var swiftUIFullDetailColor: Color {
+        let rgba = fullDetailColor
+        return Color(red: Double(rgba.x), green: Double(rgba.y), blue: Double(rgba.z))
+    }
+
+    /// The ramp behind `fullDetailColor`, split out so it can be exercised directly.
+    ///
+    /// `index == 0` (or a group with nothing to separate) returns `base` unchanged. Otherwise the
+    /// group fans out in mirrored pairs around the anchor — steps 1, 1, 2, 2, 3, 3, … alternating
+    /// sides — so consecutive categories land on OPPOSITE sides of the base colour and the step
+    /// magnitude grows outwards:
+    ///
+    ///   * hue rotates by up to half the group's window (which grows with group size, capped by
+    ///     `fullDetailMaxHueSpan`),
+    ///   * saturation moves with the side (up on one, down on the other),
+    ///   * value falls with the distance from the anchor, less steeply on the "up" side.
+    ///
+    /// Three axes rather than one because a 12-way split leaves only a few degrees of hue per step.
+    /// Distinctness within a group is guaranteed by hue alone: the offset `side · reach` is unique
+    /// per index, the window is never wide enough to wrap, and only index 0 has zero offset.
+    ///
+    /// Colour is the GROUPING cue at full detail — it says "these two are both fixtures". The
+    /// legend row and the tap read-out are what actually NAME a box, and neither depends on a
+    /// viewer resolving a 7° hue step by eye.
+    static func derivedShade(base: SIMD4<Float>, index: Int, groupCount: Int) -> SIMD4<Float> {
+        guard index > 0, groupCount > 1 else { return base }
+        let span = min(fullDetailMaxHueSpan,
+                       fullDetailBaseHueSpan + fullDetailHueSpanGrowth * Float(groupCount - 2))
+        let step = (index + 1) / 2                      // 1, 1, 2, 2, 3, 3, …
+        let maxStep = max(1, groupCount / 2)
+        let reach = min(1, Float(step) / Float(maxStep)) // 0 < reach <= 1
+        let side: Float = index % 2 == 1 ? 1 : -1
+
+        var hsv = rgbToHSV(SIMD3<Float>(base.x, base.y, base.z))
+        hsv.x = (hsv.x + side * (span / 2) * reach).truncatingRemainder(dividingBy: 1)
+        if hsv.x < 0 { hsv.x += 1 }
+        hsv.y = min(1, max(0.30, hsv.y + side * 0.28 * reach))
+        hsv.z = min(1, max(0.35, hsv.z - 0.28 * reach + (side > 0 ? 0.12 * reach : 0)))
+        let rgb = hsvToRGB(hsv)
+        return SIMD4<Float>(rgb.x, rgb.y, rgb.z, base.w)
+    }
+
+    /// Straight HSV round-trip helpers, written out rather than borrowed from `UIColor` so the
+    /// derivation stays a pure function of numbers (deterministic, and testable without UIKit).
+    private static func rgbToHSV(_ rgb: SIMD3<Float>) -> SIMD3<Float> {
+        let maxC = max(rgb.x, max(rgb.y, rgb.z))
+        let minC = min(rgb.x, min(rgb.y, rgb.z))
+        let delta = maxC - minC
+        var hue: Float = 0
+        if delta > 0 {
+            if maxC == rgb.x        { hue = (rgb.y - rgb.z) / delta / 6 }
+            else if maxC == rgb.y   { hue = (2 + (rgb.z - rgb.x) / delta) / 6 }
+            else                    { hue = (4 + (rgb.x - rgb.y) / delta) / 6 }
+            if hue < 0 { hue += 1 }
+        }
+        return SIMD3<Float>(hue, maxC > 0 ? delta / maxC : 0, maxC)
+    }
+
+    private static func hsvToRGB(_ hsv: SIMD3<Float>) -> SIMD3<Float> {
+        let h = hsv.x * 6
+        // `.rounded(.down)`, not `floor(_:)`: this is a static member of an enum that has a
+        // `floor` case, so an unqualified `floor(h)` resolves to `Self.floor` and fails to compile.
+        let whole = h.rounded(.down)
+        let sector = Int(whole) % 6
+        let f = h - whole
+        let p = hsv.z * (1 - hsv.y)
+        let q = hsv.z * (1 - hsv.y * f)
+        let t = hsv.z * (1 - hsv.y * (1 - f))
+        switch sector {
+        case 0:  return SIMD3<Float>(hsv.z, t, p)
+        case 1:  return SIMD3<Float>(q, hsv.z, p)
+        case 2:  return SIMD3<Float>(p, hsv.z, t)
+        case 3:  return SIMD3<Float>(p, q, hsv.z)
+        case 4:  return SIMD3<Float>(t, p, hsv.z)
+        default: return SIMD3<Float>(hsv.z, p, q)
+        }
+    }
+
+    // MARK: Raw-string entry points (what the loader and the renderer actually hold)
+
+    /// Display name for a raw `roomplan.json` category string, including one this build does not
+    /// know (the exporter writes `"unknown"` for a category added after this app was built).
+    static func displayName(forCategory raw: String) -> String {
+        RoomPlanCategory(rawValue: raw)?.displayName
+            ?? raw.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    /// Colour for a raw category string. An unknown category falls back to `SemanticClass.none`'s
+    /// colour, which is already what the renderer means by "don't draw this".
+    static func color(forCategory raw: String) -> SIMD4<Float> {
+        guard let category = RoomPlanCategory(rawValue: raw) else { return SemanticClass.none.color }
+        return category.fullDetailColor
+    }
+
+    // MARK: Legend filter
+
+    /// The legend row a stored category belongs to — and therefore the key the preview's transient
+    /// label filter holds. nil for a category this build does not know: nothing is drawn for those,
+    /// so nothing can be filtered either.
+    ///
+    /// One row per CATEGORY, since the preview names every box with the full RoomPlan vocabulary.
+    /// The consequence, deliberate: hiding all twelve fixtures is twelve taps, where the coarse
+    /// vocabulary this replaced could do it in one.
+    static func legendKey(forCategory raw: String?) -> String? {
+        guard let raw, let category = RoomPlanCategory(rawValue: raw) else { return nil }
+        return category.rawValue
+    }
+
+    /// Whether geometry carrying `raw` should be drawn, given the legend rows the user has switched
+    /// off. A category with no legend row is never hidden: the filter can only speak about rows the
+    /// legend actually shows.
+    static func isVisible(category raw: String?, hiddenLabels: Set<String>) -> Bool {
+        guard let key = legendKey(forCategory: raw) else { return true }
+        return !hiddenLabels.contains(key)
     }
 }
 

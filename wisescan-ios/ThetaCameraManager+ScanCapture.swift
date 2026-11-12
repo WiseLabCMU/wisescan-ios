@@ -92,7 +92,7 @@ extension ThetaCameraManager {
         }
 
         if let out = try? JSONSerialization.data(withJSONObject: obj,
-                                                 options: [.prettyPrinted, .sortedKeys]) {
+                                                 options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
             try? out.write(to: sidecarURL, options: .atomic)
         }
     }
@@ -137,7 +137,7 @@ extension ThetaCameraManager {
         )
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(metadata).write(to: dir.appendingPathComponent(String(format: "still_%04d.json", input.sequence)))
     }
 }

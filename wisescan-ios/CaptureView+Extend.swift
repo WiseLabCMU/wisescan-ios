@@ -26,7 +26,7 @@ extension CaptureView {
         // already gated this way in awaitStabilizationAndPlacePinB; gate Pin A symmetrically
         // so a bad source pose is never stored in the first place.
         guard frame.camera.trackingState == .normal else {
-            showTransientMessage("Tracking unstable — hold steady, then tap Pin & Extend again", duration: 3)
+            showTransientMessage("Tracking unstable — hold steady, then tap Save & Scan Adjacent again", duration: 3)
             return
         }
 

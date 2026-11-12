@@ -57,7 +57,7 @@ enum EquirectPostCalibration {
     /// weak-geometry scans the edge cost triple-railed solve cleanly, and NO elevation
     /// nuisance is needed on 22/23 bundles including the old-era scans where the edge
     /// cost railed at ±11.25° — that offset was absorbing mesh/model error the image
-    /// never had. elevation_offset_deg is written as an explicit 0; pitchResidual is 0;
+    /// never had. elevation_offset_deg is purged from sidecars on bake; pitch is gone;
     /// residual_px_rms retires in favour of zncc + per-still yaw spread (which also
     /// gates: spread >15° rejects the solve). The edge cost still RUNS this cycle as a
     /// logged comparison seeded with the photometric basin — never baked — and gets
@@ -87,7 +87,7 @@ enum EquirectPostCalibration {
     /// whatever else would move. Confirmed on the 2026-08-18 19:19 scan, which stamped
     /// "solved, converged, 2.92 px" with dy 2 mm off its wall and elevation pinned at the
     /// exact end of its sweep on all five stills. The operator's tape now constrains
-    /// ‖offsetPhone‖ with no conversion, and pitchResidual / elevation_offset_deg have
+    /// ‖offsetPhone‖ with no conversion, and the pitch / elevation nuisance terms have
     /// nothing systematic left to absorb — whether they collapse toward zero is the
     /// falsifiable test of this model.
     /// 9: v8's anchor never actually worked — it read depth with the byte order
@@ -170,7 +170,7 @@ enum EquirectPostCalibration {
         // 0.125 m the run before). It agreed with the edge cost's own independent answer to
         // 4.4°, so this is corroboration rather than a substitution.
         let rod = measuredRodDirection(stills: stills)
-        let bounds: RigCalibrationSolver.SolveBounds = measuredRod > 0.1
+        let bounds: RigModel.SolveBounds = measuredRod > 0.1
             ? .measured(rodLengthM: measuredRod, direction: rod)
             : .mechanical
         if measuredRod > 0.1 {
@@ -246,11 +246,8 @@ enum EquirectPostCalibration {
             return "photometric solve rejected — prior poses stamped"
         }
 
-        // elevation_offset_deg is written as an explicit 0, never omitted: bake() merges
-        // into existing sidecar JSON, and a stale nonzero value from a v≤14 solve would
-        // otherwise survive and keep shifting the face sampling.
         bake(stills: stills, profile: p, source: photo.yawOnly ? sourceYawOnly : sourceSolved,
-             residual: nil, elevOffsetDeg: 0, railed: rails,
+             residual: nil, railed: rails,
              rodAnchor: (simd_length(bounds.anchorOffset), measuredRod > 0.1),
              zncc: photo.zncc, yawSpreadDeg: photo.yawSpreadDeg)
         // Rolling geometry: persist the refined rig constants (yaw stored too, but it is
@@ -278,11 +275,17 @@ enum EquirectPostCalibration {
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let seq = obj["sequence"] as? Int,
                   let flat = obj["phone_transform"] as? [Double], flat.count == 16 else { continue }
-            let cols = (0..<4).map { c in
-                SIMD4<Float>(Float(flat[c * 4]), Float(flat[c * 4 + 1]),
-                             Float(flat[c * 4 + 2]), Float(flat[c * 4 + 3]))
-            }
-            let m = simd_float4x4(columns: (cols[0], cols[1], cols[2], cols[3]))
+            // Unrolled with explicit types. The closure form — `(0..<4).map { c in
+            // SIMD4<Float>(Float(flat[c * 4]), …) }`, sixteen Double→Float conversions inside
+            // a generic map — is rejected by Xcode 27.0 / Swift 6.4 ("unable to type-check this
+            // expression in reasonable time") in both Debug and Release, on main, from a clean
+            // checkout. Identical semantics; the solver just needs the types spelled out.
+            let f: [Float] = flat.map { Float($0) }
+            let c0 = SIMD4<Float>(f[0], f[1], f[2], f[3])
+            let c1 = SIMD4<Float>(f[4], f[5], f[6], f[7])
+            let c2 = SIMD4<Float>(f[8], f[9], f[10], f[11])
+            let c3 = SIMD4<Float>(f[12], f[13], f[14], f[15])
+            let m = simd_float4x4(columns: (c0, c1, c2, c3))
             let swayM = (obj["exposure_motion_m"] as? Double) ?? (obj["trigger_motion_m"] as? Double)
             let swayDeg = (obj["exposure_motion_deg"] as? Double) ?? (obj["trigger_motion_deg"] as? Double)
             out.append(StillRecord(
@@ -368,7 +371,6 @@ enum EquirectPostCalibration {
     /// Write cam_transform + provenance (+ residual when solved) into every sidecar.
     private nonisolated static func bake(stills: [StillRecord], profile: RigProfile,
                                          source: String, residual: Float?,
-                                         elevOffsetDeg: Float? = nil,
                                          railed: [String] = [],
                                          rodAnchor: (meters: Float, fromTape: Bool)? = nil,
                                          zncc: Float? = nil, yawSpreadDeg: Float? = nil) {
@@ -376,10 +378,10 @@ enum EquirectPostCalibration {
             guard let data = try? Data(contentsOf: still.sidecarURL),
                   var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             else { continue }
-            let cam = RigCalibrationSolver.composeRigTransform(
+            let cam = RigModel.composeRigTransform(
                 phoneToWorld: still.phoneToWorld,
                 offsetPhone: profile.offsetPhone,
-                yaw: profile.yaw, pitchResidual: profile.pitchResidual)
+                yaw: profile.yaw)
             let cols = [cam.columns.0, cam.columns.1, cam.columns.2, cam.columns.3]
             obj["cam_transform"] = cols.flatMap { [Double($0.x), Double($0.y), Double($0.z), Double($0.w)] }
             obj["rig_calibration_source"] = source
@@ -387,7 +389,10 @@ enum EquirectPostCalibration {
             if let residual { obj["rig_calibration_residual_px_rms"] = Double(residual) }
             // Image-vertical registration nuisance — consumers sampling the equirect with
             // the standard mapping (e.g. face export) can compensate by this much.
-            if let elevOffsetDeg { obj["elevation_offset_deg"] = Double(elevOffsetDeg) }
+            // v15 retired the elevation nuisance term. bake() merges into existing sidecar
+            // JSON, so the key is PURGED rather than left to a stale v≤14 value that would
+            // keep shifting the face sampling; readers default an absent key to 0.
+            obj.removeValue(forKey: "elevation_offset_deg")
             // Written on EVERY bake, empty array included: an absent key would be
             // indistinguishable from "written by a build that did not check".
             obj["rig_calibration_railed"] = railed
@@ -414,7 +419,7 @@ enum EquirectPostCalibration {
             obj["rig_rod_length_m"] = Double(profile.rodLengthM)
             obj["rig_yaw_deg"] = Double(profile.yaw * 180 / .pi)
             if let out = try? JSONSerialization.data(withJSONObject: obj,
-                                                     options: [.prettyPrinted, .sortedKeys]) {
+                                                     options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
                 try? out.write(to: still.sidecarURL, options: .atomic)
             }
         }
@@ -430,7 +435,6 @@ enum EquirectPostCalibration {
     private nonisolated static func persistedOrPrior() -> RigProfile {
         guard let stored = RigProfile.load(), stored.isSolved else { return .mechanicalPrior }
         let mech = RigProfile.mechanicalPrior
-        let pitchMax = AppConstants.calibrationBoundPitchDeg * Float.pi / 180
         // Centre on what the rig actually is when the operator has measured it. Judging a
         // 0.70 m rig against the 1.0 m mechanical prior spends most of the ±0.3 m window on
         // heights this rig cannot have, and rejects a perfectly good solved profile at 0.66 m
@@ -443,10 +447,9 @@ enum EquirectPostCalibration {
         let across = simd_length(SIMD3<Float>(0, stored.offsetPhone.y, stored.offsetPhone.z))
         let sane = abs(stored.rodLengthM - centre) <= AppConstants.calibrationBoundRodM
             && across <= AppConstants.calibrationBoundAcrossRodM * 1.5
-            && abs(stored.pitchResidual) <= pitchMax
         if !sane {
-            PerfDiag.log(String(format: "[RigCal] persisted profile REJECTED (rod=%.3fm across=%.3fm pitch=%.1f° vs anchor %.3fm) — using mechanical prior",
-                                stored.rodLengthM, across, stored.pitchResidual * 180 / .pi, centre))
+            PerfDiag.log(String(format: "[RigCal] persisted profile REJECTED (rod=%.3fm across=%.3fm vs anchor %.3fm) — using mechanical prior",
+                                stored.rodLengthM, across, centre))
             return .mechanicalPrior
         }
         return stored
@@ -485,7 +488,7 @@ enum EquirectPostCalibration {
     /// matters: Nelder-Mead approaches a wall asymptotically, so an exact equality test
     /// misses the case entirely — 2 mm inside a ±30 mm box is a rail, not a fit.
     private nonisolated static func railedParameters(
-        profile: RigProfile, bounds: RigCalibrationSolver.SolveBounds) -> [String] {
+        profile: RigProfile, bounds: RigModel.SolveBounds) -> [String] {
         var rails: [String] = []
         // Along and across the rod, matching the cylinder the solve is actually bounded by.
         // Direction-aware, and the semantics FLIPPED with the photometric port (offline
@@ -505,11 +508,7 @@ enum EquirectPostCalibration {
             rails.append(String(format: "across-rod offset %.3fm on its ±%.0fcm bound",
                                 excursion.across, bounds.acrossHalf * 100))
         }
-        let pitchDeg = profile.pitchResidual * 180 / .pi
-        if bounds.pitchHalfDeg - abs(pitchDeg) < 0.5 {
-            rails.append(String(format: "pitch %.1f° on its ±%.0f° bound", pitchDeg, bounds.pitchHalfDeg))
-        }
-        // No elevation rail (v15 has no elevation parameter) and no anchor-disagreement
+        // No pitch or elevation rail (v15 has neither parameter) and no anchor-disagreement
         // rail (the refinement is confined to the coarse basin by construction); the
         // per-still yaw SPREAD gate covers the failure those used to catch.
         return rails

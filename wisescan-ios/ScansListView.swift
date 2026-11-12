@@ -51,7 +51,9 @@ struct ScansListView: View {
     @State private var isBulkUploading = false
     @State private var bulkUploadCompleted = 0
     @State private var bulkUploadTotal = 0
+    @State private var passwordPrompt: ControlPlanePendingAction?
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @Binding var selectedTab: Int
@@ -187,6 +189,7 @@ struct ScansListView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
+            .controlPlanePasswordPrompt($passwordPrompt)
             .sheet(isPresented: $showExportSheet, onDismiss: {
                 // Safety net: if dismissed via swipe-down before the completion handler fires,
                 // reset so the Save button isn't stuck disabled.
@@ -198,13 +201,8 @@ struct ScansListView: View {
                 }
             }
             .fullScreenCover(item: $renderRequest) { req in
-                // Color from the render view: resolve item ids back to scans and run the
-                // shared bulk path. The cover dismisses so the tile progress is visible.
-                CombinedMeshScreen(request: req, onColor: { ids in
-                    let idSet = Set(ids)
-                    let scans = locations.flatMap(\.scans).filter { idSet.contains($0.id) }
-                    requestBulkColorize(scans: scans)
-                })
+                // Coloring is the cluster card's and each scan card's job, not the render's.
+                CombinedMeshScreen(request: req)
             }
             .confirmationDialog(
                 "Delete \(bulkScope == .allScans ? "Locations" : "Scans")",
@@ -393,7 +391,7 @@ struct ScansListView: View {
     }
 
     private var uploadDisabled: Bool {
-        selectedLocations.isEmpty || uploadURL.isEmpty
+        selectedLocations.isEmpty || !ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
     }
 
     private var bulkRunDisabled: Bool {
@@ -540,16 +538,21 @@ struct ScansListView: View {
         }
         isBulkExporting = true
         selectedLocations.removeAll()
-        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let totalScans = scans.count
 
         bulkProgressMessage = "Preparing 1/\(totalScans)…"
 
-        // Capture scan directories + the set of locations on main (SwiftData model access).
-        let scanInfos = scans.map { (dir: $0.scanDirectory, filename: $0.makeExportFilename(format: format)) }
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
+            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            await ScanExportManager.colorizeForExport(
+                scans, format: format, modelContext: modelContext,
+                progress: { scan, msg in if let msg { bulkProgressMessage = "\(scan.name): \(msg)" } })
+            // Capture scan directories on main, after colorizing (SwiftData model access).
+            let scanInfos = scans.map { (dir: $0.scanDirectory, filename: $0.makeExportFilename(format: format),
+                                         colorsFromCapture: $0.isColored) }
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             DispatchQueue.global(qos: .userInitiated).async {
@@ -559,7 +562,8 @@ struct ScansListView: View {
                         self.bulkProgressMessage = "Preparing \(idx + 1)/\(totalScans)…"
                     }
                     if let url = ScanExportManager.prepareExport(
-                        filename: info.filename, scanDir: info.dir, format: format, bulkStitch: bulkStitch
+                        filename: info.filename, scanDir: info.dir, format: format,
+                        vertexColorsFromCapture: info.colorsFromCapture, bulkStitch: bulkStitch
                     ) {
                         urls.append(ZipExportItem(url: url))
                     }
@@ -583,9 +587,15 @@ struct ScansListView: View {
     /// independently on a background queue. Banner tracks per-scan completion and upload progress.
     private func bulkUpload(scans: [CapturedScan]) {
         guard !isBulkUploading else { return }   // re-entrancy: double-tap = concurrent export+upload batches
-        guard !scans.isEmpty, !uploadURL.isEmpty else { return }
-        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
+        guard !scans.isEmpty,
+              ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost) else { return }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startBulkUpload(scans: scans) }
+    }
+
+    /// The batch, once `bulkUpload` has passed its checks and any password prompt.
+    private func startBulkUpload(scans: [CapturedScan]) {
+        guard !isBulkUploading else { return }
+        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
 
         isBulkUploading = true
         bulkUploadCompleted = 0
@@ -595,24 +605,38 @@ struct ScansListView: View {
 
         let locationIds = Set(scans.compactMap { $0.location?.id })
         Task { @MainActor in
+            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            await ScanExportManager.colorizeForExport(
+                scans, format: format, modelContext: modelContext,
+                progress: { scan, msg in if let msg { bulkProgressMessage = "\(scan.name): \(msg)" } })
+            bulkProgressMessage = "Uploading 0/\(scans.count)…"
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
                 let filename = scan.makeExportFilename(format: format)
-                guard let url = URL(string: baseURLString + filename) else {
+                // Where it goes: the control plane's grant, or the manual Upload URL.
+                let target: ExportUploadTarget
+                do {
+                    target = try await ExportUploadTarget.resolve(
+                        scanId: scan.id, filename: filename, contentType: format.effective(for: scan).contentType,
+                        format: format, manualURL: uploadURL)
+                } catch {
+                    scan.uploadStatus = .failed(error.localizedDescription)
                     bulkUploadCompleted += 1
                     checkBulkUploadCompletion()
                     continue
                 }
                 scan.uploadStatus = .zipping
                 let scanDir = scan.scanDirectory
+                let colorsFromCapture = scan.isColored
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
                         // No phase callback: this screen shows LOCATION tiles, not scan cards —
                         // there's no per-scan pill here to report into (LocationDetailView's
                         // bulk flows drive `bulkExportPhases`).
-                        filename: filename, scanDir: scanDir, format: format, bulkStitch: bulkStitch
+                        filename: filename, scanDir: scanDir, format: format,
+                        vertexColorsFromCapture: colorsFromCapture, bulkStitch: bulkStitch
                     ) else {
                         DispatchQueue.main.async {
                             scan.uploadStatus = .failed("Export failed")
@@ -622,29 +646,15 @@ struct ScansListView: View {
                         return
                     }
 
-                    DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
-
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "PUT"
-                    request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
-
-                    let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
-                        try? FileManager.default.removeItem(at: exportURL)
-                        DispatchQueue.main.async {
-                            if let error = error {
-                                scan.uploadStatus = .failed(error.localizedDescription)
-                            } else if let httpResponse = response as? HTTPURLResponse,
-                                      (200...299).contains(httpResponse.statusCode) {
-                                scan.uploadStatus = .success
-                                scan.lastUploadedAt = Date()
-                            } else {
-                                scan.uploadStatus = .failed("Server error")
-                            }
+                    DispatchQueue.main.async {
+                        scan.uploadStatus = .uploading(progress: 0.0)
+                        // Background transfer; the uploader sets the scan's status (see ExportUploader).
+                        ExportUploader.shared.upload(exportURL, request: target.request, scanId: scan.id,
+                                                     exportId: target.exportId) { _ in
                             self.bulkUploadCompleted += 1
                             self.checkBulkUploadCompletion()
                         }
                     }
-                    task.resume()
                 }
             }
         }
@@ -807,6 +817,22 @@ enum CaptureIntegrity {
     }
 }
 
+// MARK: - Upload status color
+// Shared by the scan card's status label and the User Guide's sample of it (UserGuideStatusIcons).
+
+extension UploadStatus {
+    var tint: Color {
+        switch self {
+        case .pending: return .white.opacity(0.6)   // was .gray — unreadable on the badge's own gray tint
+        case .zipping: return .cyan
+        case .savedLocally: return .green
+        case .uploading: return .blue
+        case .success: return .green
+        case .failed: return .red
+        }
+    }
+}
+
 // MARK: - Location Grid Tile
 
 struct LocationGridTile: View {
@@ -821,7 +847,16 @@ struct LocationGridTile: View {
     var latestScan: CapturedScan? {
         // Single O(n) pass with no intermediate sorted-array allocation; this is read
         // multiple times per body evaluation.
-        location.scans.max(by: { $0.capturedAt < $1.capturedAt })
+        // Room scans: the tile shows the room, and its world-map checks are a room scan's.
+        location.latestRoomScan
+    }
+
+    /// "3 scans", or "3 room · 2 focus" once the space has focus scans.
+    private var scanCountLabel: String {
+        let total = location.scans.count
+        let focus = location.scans.filter(\.isFocusScan).count
+        guard focus > 0 else { return "\(total) scan\(total == 1 ? "" : "s")" }
+        return "\(total - focus) room · \(focus) focus"
     }
 
     /// Any scan's world map flagged suspect at save (tracking excursion baked into the
@@ -869,7 +904,7 @@ struct LocationGridTile: View {
                     .lineLimit(1)
 
                 HStack {
-                    Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
+                    Text(scanCountLabel)
                         .font(.caption2)
                         .foregroundColor(.white.opacity(0.7))
                     Spacer()
@@ -942,8 +977,8 @@ struct LocationGridTile: View {
             }
             let previewURL = latest.modelPreviewURL
             let fallbackURL = latest.thumbnailURL
-            let worldMapPaths = location.scans.map { $0.worldMapURL.path }
-            let rawDirs = location.scans.map { $0.rawDataPath }
+            let worldMapPaths = location.roomScans.map { $0.worldMapURL.path }   // focus scans have no map by design
+            let rawDirs = location.roomScans.map { $0.rawDataPath }
 
             // Missing-worldmap flag off-main.
             hasMissingWorldMap = await Task.detached(priority: .utility) {
@@ -991,14 +1026,13 @@ struct ScanCard: View {
     var uploadURL: String
     var isEditing: Bool
     var onUpdate: (CapturedScan) -> Void
-    var onDelete: (CapturedScan) -> Void
 
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
     @AppStorage(AppConstants.Key.forceRebuildArtifacts) private var forceRebuildArtifacts: Bool = AppConstants.forceRebuildArtifacts
     @Environment(\.modelContext) private var modelContext
     @State private var exportItem: ZipExportItem?
     @State private var showExportError = false
-    @State private var showDeleteConfirm = false
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int, equirect: Int)?
     @State private var showDataIntegrityAlert = false
     @State private var showMeshPreview = false
@@ -1016,9 +1050,14 @@ struct ScanCard: View {
     @State private var exportPhase: ExportPhase?
     /// DECISION 3 hard gate: upload requires this scan post-processed.
     @State private var showPostprocessAlert = false
+    @State private var passwordPrompt: ControlPlanePendingAction?
+    /// Focus scans: the photo viewer (in place of the mesh preview), and the room scan the
+    /// capture relocalized into, shown small beside the photo.
+    @State private var showFocusPhotos = false
+    @State private var parentPreviewImage: UIImage?
 
     private var selectedFormat: ExportFormat {
-        get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
+        get { ExportFormat.persisted(selectedFormatStr) ?? .polycam }
         nonmutating set { selectedFormatStr = newValue.rawValue }
     }
 
@@ -1039,7 +1078,7 @@ struct ScanCard: View {
     /// Single-card save/upload uses the local `exportPhase` @State.
     var bulkExportPhase: ExportPhase?
 
-    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, bulkExportPhase: ExportPhase? = nil, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
+    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, bulkExportPhase: ExportPhase? = nil, onUpdate: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
         self.scan = scan
         self.isLatest = isLatest
         self.uploadURL = uploadURL
@@ -1048,7 +1087,6 @@ struct ScanCard: View {
         self.bulkColoringMessage = bulkColoringMessage
         self.bulkExportPhase = bulkExportPhase
         self.onUpdate = onUpdate
-        self.onDelete = onDelete
         self.onSelect = onSelect
     }
 
@@ -1135,6 +1173,25 @@ struct ScanCard: View {
             Text("The scan data may have been deleted.")
         }
         .task(id: scan.id) {
+            // A focus scan's data is its still-capture folder: count stills and depth there and
+            // size the folder; it has no map, so nothing is "missing".
+            if scan.isFocusScan {
+                let captureDir = scan.focusCaptureURL
+                let focus = await Task.detached(priority: .utility) { () -> (counts: (Int, Int, Int, Int, Int, Int), sizeMB: Double) in
+                    let fm = FileManager.default
+                    func count(_ sub: String) -> Int {
+                        (try? fm.contentsOfDirectory(atPath: captureDir.appendingPathComponent(sub).path))?.count ?? 0
+                    }
+                    let files = (fm.enumerator(at: captureDir, includingPropertiesForKeys: [.fileSizeKey])?.allObjects as? [URL]) ?? []
+                    let bytes = files.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+                    let photos = count("photos")
+                    return ((photos, 0, count("photo_depth"), count("photo_confidence"), 0, 0), Double(bytes) / (1024.0 * 1024.0))
+                }.value
+                itemCounts = focus.counts
+                isRelocMissing = false
+                sizeMB = focus.sizeMB
+                return
+            }
             // Resolve all disk-derived values off the main thread in a single detached
             // pass, so the view body performs no synchronous FileManager I/O during
             // layout/scroll (previously: previewURL existence, reloc-warning existence,
@@ -1185,12 +1242,22 @@ struct ScanCard: View {
             } else {
                 previewImage = await ThumbnailCache.image(for: thumbURL)
             }
+            // A focus scan's photo is the thumbnail above; the inset is its room scan's preview.
+            if scan.isFocusScan, let parentId = scan.parentScanId,
+               let parent = scan.location?.scans.first(where: { $0.id == parentId }) {
+                let parentPreview = parent.modelPreviewURL, parentThumb = parent.thumbnailURL
+                if let img = await ThumbnailCache.image(for: parentPreview) {
+                    parentPreviewImage = img
+                } else {
+                    parentPreviewImage = await ThumbnailCache.image(for: parentThumb)
+                }
+            }
         }
     }
 
     @ViewBuilder
     private var previewImageSection: some View {
-        Button(action: { showMeshPreview = true }) {
+        Button(action: { if scan.isFocusScan { showFocusPhotos = true } else { showMeshPreview = true } }) {
             Group {
                 if let image = previewImage {
                     Image(uiImage: image)
@@ -1212,6 +1279,18 @@ struct ScanCard: View {
         .contentShape(Rectangle())
         .overlay(editingOverlay)
         .overlay(alignment: .topLeading) { warningsOverlay }
+        .overlay(alignment: .bottomLeading) { focusScanOverlay }
+        .fullScreenCover(isPresented: $showFocusPhotos) {
+            NavigationView {
+                FocusScanPhotosView(scan: scan)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("Done") { showFocusPhotos = false }
+                        }
+                    }
+            }
+        }
         .overlay {
             if let msg = activeColoringMessage {
                 ZStack {
@@ -1227,17 +1306,6 @@ struct ScanCard: View {
                 }
             }
         }
-        .confirmationDialog(
-            "Delete Scan",
-            isPresented: $showDeleteConfirm
-        ) {
-            Button("Delete \"\(scan.name)\"", role: .destructive) {
-                onDelete(scan)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will permanently delete this scan and its data.")
-        }
     }
 
     @ViewBuilder
@@ -1247,8 +1315,43 @@ struct ScanCard: View {
         }
     }
 
+    /// Focus scans: what kind of scan this is (it looks like nothing else in the list: no mesh, no
+    /// reconstruction), and the room scan it was taken in, small, under the photo.
+    @ViewBuilder
+    private var focusScanOverlay: some View {
+        if scan.isFocusScan {
+            HStack(alignment: .bottom, spacing: 6) {
+                if let parent = parentPreviewImage {
+                    Image(uiImage: parent)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: AppConstants.focusCardInsetSize, height: AppConstants.focusCardInsetSize)
+                        .clipped()
+                        .cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.yellow.opacity(0.8), lineWidth: 1))
+                }
+                Label("Focus · partial", systemImage: "scope")
+                    .font(.caption2.bold())
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.yellow)
+                    .cornerRadius(6)
+            }
+            .padding(8)
+            .allowsHitTesting(false)
+        }
+    }
+
     @ViewBuilder
     private var warningsOverlay: some View {
+        if !scan.isFocusScan {
+            roomScanWarnings
+        }
+    }
+
+    @ViewBuilder
+    private var roomScanWarnings: some View {
         VStack(alignment: .leading, spacing: 6) {
             if isRelocMissing {
                 warningBadge(color: .yellow) { showMissingRelocAlert = true }
@@ -1307,12 +1410,25 @@ struct ScanCard: View {
                 Text(scan.name)
                     .font(.subheadline).bold()
                     .foregroundColor(.white)
-                HStack(spacing: 8) {
-                    Text(String(format: "%.1f MB", sizeMB))
-                    Text("\(formattedCount(scan.faceCount)) polys")
+                if scan.isFocusScan, let region = scan.focusRegion {
+                    Text(region.displayName)
+                        .font(.caption.bold())
+                        .foregroundColor(.yellow)
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(String(format: "%.1f MB", sizeMB))
+                        Text("\(scan.stillCount) photos · \(region.detail.title)")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
+                } else {
+                    HStack(spacing: 8) {
+                        Text(String(format: "%.1f MB", sizeMB))
+                        Text("\(formattedCount(scan.faceCount)) polys")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
                 }
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.7))
                 Text(scan.timeSinceCapture)
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.7))
@@ -1414,7 +1530,8 @@ struct ScanCard: View {
             // deferred RoomBuilder often lands roomplan.json after auto-process ran,
             // leaving registration/proxy pending; that used to cost a mystery first
             // click). Manual re-runs live in the long-press menu for recovery cases.
-            do {
+            // A focus scan has nothing to color or process.
+            if !scan.isFocusScan {
                 let processDisabled = isEditing || activeColoringMessage != nil
                 Menu {
                     Button(action: { reRunProcessing() }, label: {
@@ -1433,6 +1550,7 @@ struct ScanCard: View {
                 .disabled(processDisabled)
             }
         }
+        .controlPlanePasswordPrompt($passwordPrompt)
         .alert("Post-process Required", isPresented: $showPostprocessAlert) {
             Button("Post-process Now") { reRunProcessing() }
             Button("Cancel", role: .cancel) {}
@@ -1519,7 +1637,12 @@ struct ScanCard: View {
     }
 
     private var uploadButtonDisabled: Bool {
-        isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading
+        isEditing || !uploadsConfigured || scan.uploadStatus.isUploading
+    }
+
+    /// The control plane hands out upload destinations; the manual URL is the fallback.
+    private var uploadsConfigured: Bool {
+        ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
     }
 
     @ViewBuilder
@@ -1569,16 +1692,7 @@ struct ScanCard: View {
         .animation(.easeInOut(duration: 0.15), value: label)
     }
 
-    private var statusColor: Color {
-        switch scan.uploadStatus {
-        case .pending: return .white.opacity(0.6)   // was .gray — unreadable on the badge's own gray tint
-        case .zipping: return .cyan
-        case .savedLocally: return .green
-        case .uploading: return .blue
-        case .success: return .green
-        case .failed: return .red
-        }
-    }
+    private var statusColor: Color { scan.uploadStatus.tint }
 
     private func formattedCount(_ count: Int) -> String {
         if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000.0) }
@@ -1587,7 +1701,7 @@ struct ScanCard: View {
     }
 
     private func uploadScan() {
-        guard !uploadURL.isEmpty else { return }
+        guard uploadsConfigured else { return }
         // Re-entrancy: an export/upload for this scan is already running — a second concurrent
         // prepareExport doubles the privacy-blur working set (OOM on phones; see UploadStatus.isInFlight).
         guard !scan.uploadStatus.isInFlight else { return }
@@ -1597,21 +1711,42 @@ struct ScanCard: View {
             showPostprocessAlert = true
             return
         }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startUpload() }
+    }
+
+    /// The export and upload, once `uploadScan` has passed its checks and any password prompt.
+    private func startUpload() {
+        guard !scan.uploadStatus.isInFlight else { return }
         scan.uploadStatus = .zipping
         onUpdate(scan)
 
         let format = selectedFormat
-        let filename = scan.makeExportFilename(format: format)
-
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
-        guard let url = URL(string: baseURLString + filename) else {
-            scan.uploadStatus = .failed("Invalid URL")
-            onUpdate(scan)
-            return
+        Task { @MainActor in
+            // Mesh exports ship captured colors: colorize first if the scan isn't yet.
+            await ScanExportManager.colorizeForExport(
+                [scan], format: format, modelContext: modelContext,
+                progress: { _, msg in exportPhase = msg.map { ExportPhase($0) } })
+            exportPhase = nil
+            // Where it goes: the control plane's grant, or the manual Upload URL.
+            do {
+                let target = try await ExportUploadTarget.resolve(
+                    scanId: scan.id, filename: scan.makeExportFilename(format: format),
+                    contentType: format.effective(for: scan).contentType, format: format, manualURL: uploadURL)
+                uploadExport(format: format, to: target)
+            } catch {
+                scan.uploadStatus = .failed(error.localizedDescription)
+                onUpdate(scan)
+            }
         }
+    }
+
+    /// The upload proper, once `uploadScan` has the scan ready to export and somewhere to send it.
+    private func uploadExport(format: ExportFormat, to target: ExportUploadTarget) {
+        let filename = scan.makeExportFilename(format: format)
 
         // Capture scan directory on main thread (SwiftData models aren't thread-safe)
         let scanDir = scan.scanDirectory
+        let colorsFromCapture = scan.isColored
         print("[Upload] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         guard FileManager.default.fileExists(atPath: scanDir.path) else {
             scan.uploadStatus = .failed("No scan data")
@@ -1622,6 +1757,7 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             guard let exportURL = ScanExportManager.prepareExport(
                 filename: filename, scanDir: scanDir, format: format,
+                vertexColorsFromCapture: colorsFromCapture,
                 phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) else {
                 DispatchQueue.main.async {
@@ -1637,45 +1773,14 @@ struct ScanCard: View {
                 self.exportPhase = nil
                 self.scan.uploadStatus = .uploading(progress: 0.0)
                 self.onUpdate(self.scan)
-            }
-
-            // Upload natively via streaming
-            var request = URLRequest(url: url)
-            request.httpMethod = "PUT"
-            request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
-
-            // Track upload progress using KVO
-            class ObserverBox { var observer: NSKeyValueObservation? }
-            let box = ObserverBox()
-
-            let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, uploadError in
-                _ = box
-
-                try? FileManager.default.removeItem(at: exportURL)
-                DispatchQueue.main.async {
+                // A background transfer: it finishes with the screen locked or the app closed, and
+                // the uploader sets the scan's progress, status and lastUploadedAt itself.
+                ExportUploader.shared.upload(exportURL, request: target.request, scanId: self.scan.id,
+                                             exportId: target.exportId) { _ in
                     self.scan.selectedFormat = self.selectedFormat
-                    if let uploadError = uploadError {
-                        self.scan.uploadStatus = .failed(uploadError.localizedDescription)
-                    } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                        self.scan.uploadStatus = .success
-                        self.scan.lastUploadedAt = Date()
-                    } else {
-                        self.scan.uploadStatus = .failed("Server error")
-                    }
                     self.onUpdate(self.scan)
                 }
             }
-
-            box.observer = task.progress.observe(\.fractionCompleted) { progress, _ in
-                DispatchQueue.main.async {
-                    if case .uploading = self.scan.uploadStatus {
-                        self.scan.uploadStatus = .uploading(progress: progress.fractionCompleted)
-                        self.onUpdate(self.scan)
-                    }
-                }
-            }
-
-            task.resume()
         }
     }
 
@@ -1695,9 +1800,22 @@ struct ScanCard: View {
         onUpdate(scan)
 
         let format = selectedFormat
+        Task { @MainActor in
+            // Mesh exports ship captured colors: colorize first if the scan isn't yet.
+            await ScanExportManager.colorizeForExport(
+                [scan], format: format, modelContext: modelContext,
+                progress: { _, msg in exportPhase = msg.map { ExportPhase($0) } })
+            exportPhase = nil
+            saveExportToFiles(format: format)
+        }
+    }
+
+    /// The export proper, once `saveToFiles` has the scan ready to export.
+    private func saveExportToFiles(format: ExportFormat) {
         let filename = scan.makeExportFilename(format: format)
 
         let scanDir = scan.scanDirectory
+        let colorsFromCapture = scan.isColored
         print("[SaveToFiles] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         print("[SaveToFiles] location?.id: \(scan.location?.id.uuidString ?? "nil")")
         print("[SaveToFiles] meshFileURL: \(scan.meshFileURL.path) exists=\(FileManager.default.fileExists(atPath: scan.meshFileURL.path))")
@@ -1714,6 +1832,7 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             if let exportURL = ScanExportManager.prepareExport(
                 filename: filename, scanDir: scanDir, format: format,
+                vertexColorsFromCapture: colorsFromCapture,
                 phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) {
                 DispatchQueue.main.async {
@@ -1786,8 +1905,7 @@ struct ShareSheet: UIViewControllerRepresentable {
         isLatest: true,
         uploadURL: "https://example.com/upload",
         isEditing: false,
-        onUpdate: { _ in },
-        onDelete: { _ in }
+        onUpdate: { _ in }
     )
     .padding()
     .background(Color.black)

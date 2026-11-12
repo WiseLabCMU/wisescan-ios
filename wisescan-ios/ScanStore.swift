@@ -38,6 +38,17 @@ class CapturedScan {
     /// rescan/link seated on this map can inherit an offset frame — the rescan/connect
     /// buttons warn before proceeding. Defaulted for lightweight migration of existing scans.
     var worldMapSuspect: Bool = false
+    /// `ScanKind` raw value: a room scan (mesh, RoomPlan, photos) or a focus scan (stills of one
+    /// region, no mesh or map of its own). "" for scans saved before focus scans existed: room.
+    var scanKindRaw: String = ""
+    /// Focus scans: the room scan whose world map the capture relocalized into, and so whose
+    /// frame its poses are in ("" otherwise).
+    var parentScanIdRaw: String = ""
+    /// Focus scans: the captured region as `FocusRegion` JSON ("" otherwise). Inline so cards
+    /// read it without file I/O; `focus_region.json` in the scan folder is the export copy.
+    var focusRegionJSON: String = ""
+    /// Focus scans: stills saved.
+    var stillCount: Int = 0
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
@@ -65,7 +76,7 @@ class CapturedScan {
     }
 
     @Transient var selectedFormat: ExportFormat {
-        get { ExportFormat(rawValue: selectedFormatStr) ?? .scan4d }
+        get { ExportFormat.persisted(selectedFormatStr) ?? .scan4d }
         set { selectedFormatStr = newValue.rawValue }
     }
 
@@ -105,7 +116,26 @@ class CapturedScan {
                 uploadStatusStr = "uploading"
                 uploadProgress = prog
             }
+            // Every export and upload the user starts passes through here, on every exit path,
+            // so the screen stays awake exactly while this scan's pipeline owns it.
+            ScreenAwake.set(ScreenAwake.uploadHolder(id), held: newValue.isInFlight)
         }
+    }
+
+    @Transient var scanKind: ScanKind {
+        get { ScanKind(rawValue: scanKindRaw) ?? .room }
+        set { scanKindRaw = newValue.rawValue }
+    }
+
+    /// Stills of one region: no mesh, world map or RoomPlan of its own. Never a relocalization
+    /// source, never the canonical frame owner, never post-processed or colored.
+    @Transient var isFocusScan: Bool { scanKind == .focus }
+
+    @Transient var parentScanId: UUID? { UUID(uuidString: parentScanIdRaw) }
+
+    @Transient var focusRegion: FocusRegion? {
+        get { focusRegionJSON.isEmpty ? nil : FocusRegion.decode(Data(focusRegionJSON.utf8)) }
+        set { focusRegionJSON = newValue?.encoded().flatMap { String(data: $0, encoding: .utf8) } ?? "" }
     }
 
     @Transient var isUploaded: Bool { lastUploadedAt != nil }
@@ -131,9 +161,21 @@ class CapturedScan {
     @Transient var meshFileURL: URL { scanDirectory.appendingPathComponent("mesh.obj") }
     @Transient var colorsFileURL: URL { scanDirectory.appendingPathComponent("colors.bin") }
     @Transient var worldMapURL: URL { scanDirectory.appendingPathComponent("arworldmap.map") }
+    /// Feature cloud serialized from the same `ARWorldMap` as `worldMapURL` — written as a sidecar
+    /// beside the temp map at export and promoted here by `saveScan`, so it exists only for scans
+    /// that actually produced a map (raw capture frame, like the map itself).
+    @Transient var featurePointsURL: URL { scanDirectory.appendingPathComponent(FeaturePointCloudFile.filename) }
     @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
+    /// Sweep-coverage grid frozen at the Stop tap and written by `saveScan` straight from the
+    /// in-memory snapshot (derived from poses + depth, not the map, so map-less saves have one too).
+    @Transient var sweepCoverageURL: URL { scanDirectory.appendingPathComponent(SweepCoverageFile.filename) }
+
+    /// Focus scans: the still-capture dump (photos/, photo_depth/, photo_confidence/, CSVs, logs,
+    /// manifest.json), as `ARStillCaptureSession` wrote it.
+    @Transient var focusCaptureURL: URL { scanDirectory.appendingPathComponent(AppConstants.focusCaptureFolder) }
+    @Transient var focusRegionFileURL: URL { scanDirectory.appendingPathComponent(AppConstants.focusRegionFilename) }
 
     @Transient var roomPlanFileURL: URL { scanDirectory.appendingPathComponent("roomplan.json") }
     @Transient var roomPlanRawFileURL: URL { scanDirectory.appendingPathComponent("roomplan_raw.json") }
@@ -187,7 +229,8 @@ class CapturedScan {
 enum ExportFormat: String, CaseIterable, Codable {
     case scan4d = "Scan4D"
     case polycam = "Polycam"
-    case raw = "RAW"
+    case nerfstudio = "Nerfstudio"
+    case flame3d = "Flame3D"
     case usdz = "USDZ"
     case ply = "PLY"
     case obj = "OBJ"
@@ -197,7 +240,7 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "usdz"
         case .ply: return "ply"
         case .obj: return "obj"
-        case .scan4d, .polycam, .raw: return "zip"
+        case .scan4d, .polycam, .nerfstudio, .flame3d: return "zip"
         }
     }
 
@@ -206,8 +249,37 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "model/vnd.usdz+zip"
         case .ply: return "application/x-ply"
         case .obj: return "application/x-wavefront-obj"
-        case .scan4d, .polycam, .raw: return "application/zip"
+        case .scan4d, .polycam, .nerfstudio, .flame3d: return "application/zip"
         }
+    }
+
+    /// The export carries the scan's mesh, and with it the mesh's vertex colors. Exporting
+    /// one colorizes the scan first if it hasn't been (`ScanExportManager.colorizeForExport`),
+    /// so the colors that ship are sampled from the frames, never the normals preview.
+    var includesMesh: Bool {
+        switch self {
+        case .nerfstudio, .flame3d, .usdz, .ply, .obj: return true
+        case .scan4d, .polycam: return false
+        }
+    }
+
+    /// Decodes a persisted raw value, mapping names that have changed.
+    ///
+    /// This format was called "RAW" until it was rebuilt into a bundle that actually loads
+    /// (it had shipped transposed poses since it was introduced). The name is persisted in
+    /// SwiftData (`CapturedScan.selectedFormatStr`) and in `@AppStorage`, so without this
+    /// mapping every scan and preference holding "RAW" would silently fall back to Scan4D —
+    /// quietly switching the user to a different export.
+    static func persisted(_ rawValue: String) -> ExportFormat? {
+        if let format = ExportFormat(rawValue: rawValue) { return format }
+        return rawValue == "RAW" ? .nerfstudio : nil
+    }
+
+    /// The format a scan actually exports in. A focus scan has one export, its still-capture zip
+    /// (`ScanExportManager.prepareFocusExport`), whatever format is selected, so its filename and
+    /// upload content type follow `.scan4d`'s zip.
+    func effective(for scan: CapturedScan) -> ExportFormat {
+        scan.isFocusScan ? .scan4d : self
     }
 }
 
@@ -284,6 +356,14 @@ enum ScanCase: String, Codable, CaseIterable {
     case linkAdjacent = "LinkAdjacent"
 }
 
+/// What a capture produces. A room scan records mesh, RoomPlan and photos of the whole space; a
+/// focus scan is full-resolution stills of one box-shaped region, with no mesh or RoomPlan of its
+/// own (docs/design/capture-modes.md). Stored raw on `CapturedScan`; "" (legacy) reads as room.
+enum ScanKind: String, Codable, CaseIterable {
+    case room = "Room"
+    case focus = "Focus"
+}
+
 // MARK: - Scan Hierarchy Model
 
 @Model
@@ -316,6 +396,16 @@ class ScanLocation {
             return ScanCase(rawValue: scanCaseStr) ?? .rescanSpace
         }
         set { scanCaseStr = newValue.rawValue }
+    }
+
+    /// The scans that carry the room: mesh, world map, RoomPlan. Everything that assumes those
+    /// (the original / canonical-frame owner, the rescan's map, the history scrubber, stitching,
+    /// post-processing) reads this, not `scans`; focus scans only appear in the scan list.
+    @Transient var roomScans: [CapturedScan] { scans.filter { !$0.isFocusScan } }
+
+    /// The newest room scan: a rescan's or focus scan's world map and ghost come from it.
+    @Transient var latestRoomScan: CapturedScan? {
+        roomScans.max(by: { $0.capturedAt < $1.capturedAt })
     }
 }
 
@@ -376,6 +466,15 @@ class ScanStore {
     var activeScanToExtend: UUID?
     /// Whether the user chose "Rescan Space" or "Link Adjacent Space".
     var activeScanCase: ScanCase = .rescanSpace
+    /// What this capture produces. Everything up to Start is the ordinary Rescan flow for both; at
+    /// Start a focus scan runs the still-capture branch (ARStillCaptureSession) instead of
+    /// recording mesh and RoomPlan. Cleared with the rest of the capture state.
+    var activeScanKind: ScanKind = .room
+    /// Focus scan: the region and detail level to capture (nil for a room scan).
+    var activeFocusRequest: FocusCaptureRequest?
+    /// A room scan is recording or a focus scan is capturing (mirrored from CaptureView's
+    /// `isCapturing`), so app-level navigation (a region deep link) can refuse to leave it.
+    var isCaptureActive = false
 
     // MARK: Capture Phase
 
@@ -394,6 +493,11 @@ class ScanStore {
     /// - **Mesh-ICP refine** (legacy, perfDiagnostics-only, engages only for scans with no proxy
     ///   artifact): a trusted correction queued to bake into the world origin at record-start.
     var icpAlignReady: ICPAlignReady?
+
+    /// The AR session has relocalized into the loaded world map and is still in its frame
+    /// (ARCoverageView.Coordinator.inMapFrame). A focus scan's region and stills are only
+    /// meaningful in that frame, so its Start waits for this.
+    var sessionInMapFrame = false
 
     /// Set by the VIO-compromised halt (`handleVIOCompromised`): tracking collapsed hard enough
     /// to kill the scan (snap storm / RoomPlan DriftDetection), so ARKit's internal map is
@@ -486,6 +590,16 @@ class ScanStore {
     /// path. The box builds the room and writes roomplan.json/_raw whenever both the didEndWith
     /// data and this destination are in hand. Weakly captures the coordinator.
     @ObservationIgnored var setRoomDataPersistDir: ((URL) -> Void)?
+    /// Freezes the live sweep-coverage accumulator and returns its snapshot. Populated by
+    /// ARCoverageView; called on MAIN at the Stop tap. It stops accepting frames and drains the
+    /// in-flight update before returning, so the snapshot covers exactly the recorded frames.
+    /// Returns nil (or the hook is nil) when the capture view is already gone.
+    @ObservationIgnored var freezeSweepCoverage: (() -> SweepCoverageSnapshot?)?
+    /// Reads the live sweep-coverage counters WITHOUT freezing the recorder (the developer
+    /// coverage readout polls it at ~1 Hz on MAIN while recording). Populated by ARCoverageView;
+    /// returns nil (or the hook is nil) when the capture view is gone. Never call
+    /// `freezeSweepCoverage` for a readout: it stops the sweep.
+    @ObservationIgnored var sweepCoverageLiveStats: (() -> SweepCoverageLiveStats?)?
     /// Re-runs the AR session's configuration if no frames have been delivered for several
     /// seconds — the record button's escape from a wedged capture graph (set by ARCoverageView;
     /// called from the record tap's "establishing tracking" bounce).
@@ -500,6 +614,8 @@ class ScanStore {
         activeRelocalizationMap = nil
         activeScanToExtend = nil
         activeScanCase = .rescanSpace
+        activeScanKind = .room
+        activeFocusRequest = nil
         capturePhase = .idle
         boundaryAnchorTransform = nil
         boundaryAnchorId = nil
@@ -960,6 +1076,33 @@ class ScanFileManager {
     /// capture had already stopped covering).
     private(set) var lastSaveFailureReason: String?
 
+    /// Artifacts that failed to write during the most recent `saveScan`, by filename (#58).
+    ///
+    /// The critical mesh write aborts and rolls back; everything after it is deliberately
+    /// best-effort, because a missing thumbnail must never cost the operator a scan. But
+    /// best-effort was also SILENT: these sites used `print`, which the codebase's own
+    /// comment nine lines up notes does not survive Release, so a bundle could ship
+    /// missing its colors, world map or raw-dir mesh mirror with nothing anywhere saying
+    /// so. Record them, log them on Logger, and stamp them into the bundle's metadata —
+    /// without changing the control flow, which is correct as it stands.
+    private(set) var lastSaveArtifactFailures: [String] = []
+
+    /// Run a best-effort artifact write, recording the artifact's name if it throws.
+    private func bestEffort(_ artifact: String, _ work: () throws -> Void) {
+        do { try work() } catch {
+            lastSaveArtifactFailures.append(artifact)
+            Self.log.error("saveScan artifact FAILED \(artifact, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Record an artifact that never reached the save with no throwing call to wrap — a producer
+    /// upstream swallowed the failure and left nothing on disk. Same bookkeeping as `bestEffort`
+    /// so the name still reaches `incomplete_artifacts`.
+    private func recordMissingArtifact(_ artifact: String, reason: String) {
+        lastSaveArtifactFailures.append(artifact)
+        Self.log.error("saveScan artifact MISSING \(artifact, privacy: .public): \(reason, privacy: .public)")
+    }
+
     /// Free space on the Documents volume, in bytes ("important usage" = what iOS will
     /// actually let an app consume, after purgeable reclamation).
     static func freeDiskBytes() -> Int64? {
@@ -987,11 +1130,15 @@ class ScanFileManager {
         rawDataPath: URL?,
         vertexColors: Data?,
         worldMapURL: URL?,
+        // No default on purpose: every call site must decide whether it has a snapshot, so a new
+        // save path can't silently drop coverage (cf. PendingScanData.worldMapSuspect's default).
+        sweepCoverage: SweepCoverageSnapshot?,
         thumbnailData: Data? = nil,
         scanCase: ScanCase = .rescanSpace,
         worldMapSuspect: Bool = false
     ) -> CapturedScan? {
         lastSaveFailureReason = nil
+        lastSaveArtifactFailures = []
         let targetLocation: ScanLocation
         // Track a location we create here so we can roll it back if the required mesh write fails
         // (otherwise a failed save would leave behind an empty, undeletable location).
@@ -1034,7 +1181,7 @@ class ScanFileManager {
             if let data = try? Data(contentsOf: metaURL),
                var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 json["worldmap_suspect"] = true
-                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
                     try? out.write(to: metaURL)
                 }
             }
@@ -1073,18 +1220,40 @@ class ScanFileManager {
 
         // Optional files — failures must not block the critical raw data move
         if let colors = vertexColors {
-            do { try colors.write(to: newScan.colorsFileURL) } catch { print("[ScanFileManager] Failed to write colors: \(error)") }
+            bestEffort("colors.bin") { try colors.write(to: newScan.colorsFileURL) }
         }
         if let map = worldMapURL {
             // Hard-link rather than copy: the map is up to 50 MB, is immutable once exported, and
             // raw_data/relocalization.worldmap already links the same temp file. Fall back to a
             // real copy when linking can't work (source on another volume).
             if (try? FileManager.default.linkItem(at: map, to: newScan.worldMapURL)) == nil {
-                do { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) } catch { print("[ScanFileManager] Failed to copy worldmap: \(error)") }
+                bestEffort("relocalization.worldmap") { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) }
             }
+            // The feature cloud rides along with the map: same export, same raw capture frame, and
+            // it is derived from no parameter of its own — the sidecar sits beside the temp map.
+            // Every exported map writes one unconditionally, and a cloud with no points is still a
+            // header-only file, so absence here means the save-time write failed. Name it: a
+            // consumer that finds neither the file nor an `incomplete_artifacts` entry would
+            // otherwise read a broken current save as a scan predating the format.
+            let features = FeaturePointCloudFile.tempURL(besideWorldMap: map)
+            if FileManager.default.fileExists(atPath: features.path) {
+                if (try? FileManager.default.linkItem(at: features, to: newScan.featurePointsURL)) == nil {
+                    bestEffort(FeaturePointCloudFile.filename) {
+                        try FileManager.default.copyItem(at: features, to: newScan.featurePointsURL)
+                    }
+                }
+            } else {
+                recordMissingArtifact(FeaturePointCloudFile.filename,
+                                      reason: "no sidecar beside the exported map at \(features.lastPathComponent)")
+            }
+        } else {
+            // No map means getCurrentWorldMap failed or timed out, which takes the cloud with it.
+            // The map itself no longer ships in the bundle, so this is the only trace a consumer
+            // would ever get that the cloud was expected and lost.
+            recordMissingArtifact(FeaturePointCloudFile.filename, reason: "world map export produced no map")
         }
         if let thumb = thumbnailData {
-            do { try thumb.write(to: newScan.thumbnailURL) } catch { print("[ScanFileManager] Failed to write thumbnail: \(error)") }
+            bestEffort("thumbnail.jpg") { try thumb.write(to: newScan.thumbnailURL) }
         }
 
         // Critical: move raw data directory (images, depth, cameras, metadata)
@@ -1101,7 +1270,7 @@ class ScanFileManager {
                 // via rename), so the shared inode can never be mutated underneath one name.
                 let rawMeshURL = newScan.rawDataPath.appendingPathComponent("mesh.obj")
                 if (try? FileManager.default.linkItem(at: newScan.meshFileURL, to: rawMeshURL)) == nil {
-                    try? meshData.write(to: rawMeshURL, options: .atomic)
+                    bestEffort("raw_data/mesh.obj") { try meshData.write(to: rawMeshURL, options: .atomic) }
                 }
 
                 // Extract first RGB frame to thumbnailURL
@@ -1133,6 +1302,42 @@ class ScanFileManager {
                     if (try? FileManager.default.linkItem(at: src, to: dst)) == nil {
                         try? FileManager.default.copyItem(at: src, to: dst)
                     }
+                }
+            }
+        }
+
+        // Sweep coverage — written directly from the in-memory snapshot frozen at the Stop tap.
+        // DESIGN: this deliberately departs from arkit_features.bin's temp-file-beside-the-map
+        // pattern. Coverage is derived from poses + depth, not the map; two save paths have no
+        // map at all (the VIO-loss recovered scan, and Lite when no map exported) yet still have
+        // real or legitimately empty coverage; and a value write needs no temp file, so there is
+        // nothing for discardPendingScan / discardInProgressScan to clean up. An empty grid (no
+        // frames, or no depth) is still written as a valid header-only file; only a lost snapshot
+        // or a failed write is named in incomplete_artifacts. scanDirectory was created with the
+        // mesh write above (the save returns early if that failed), so the target dir exists.
+        if let sweepCoverage {
+            bestEffort(SweepCoverageFile.filename) {
+                try SweepCoverageFile.encode(sweepCoverage).write(to: newScan.sweepCoverageURL, options: .atomic)
+            }
+        } else {
+            recordMissingArtifact(SweepCoverageFile.filename,
+                                  reason: "no sweep-coverage snapshot reached the save (capture view gone at Stop)")
+        }
+
+        // Bundle self-description (#58): if any optional artifact failed above, say so INSIDE
+        // the bundle. The save is deliberately not blocked — a missing thumbnail must never
+        // cost the operator a scan — but "shipped incomplete with no signal anywhere" is the
+        // failure mode this guards. Written after the raw-dir move so it lands at the final
+        // path, mirroring the worldmap_suspect patch above.
+        if !lastSaveArtifactFailures.isEmpty {
+            let missing = lastSaveArtifactFailures
+            Self.log.error("saveScan completed with \(missing.count, privacy: .public) missing artifact(s): \(missing.joined(separator: ", "), privacy: .public)")
+            let metaURL = newScan.rawDataPath.appendingPathComponent("scan4d_metadata.json")
+            if let data = try? Data(contentsOf: metaURL),
+               var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                json["incomplete_artifacts"] = missing
+                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
+                    try? out.write(to: metaURL)
                 }
             }
         }

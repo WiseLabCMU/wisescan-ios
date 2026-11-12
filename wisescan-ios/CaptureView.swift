@@ -8,6 +8,7 @@ import SwiftData
 struct CaptureView: View {
     @Environment(ScanStore.self) var scanStore
     @Environment(\.modelContext) var modelContext
+    @Environment(\.scenePhase) var scenePhase
     @State var scanStats = ScanStats()
     @State var locationManager = LocationManager()
     @AppStorage(AppConstants.Key.privacyFilter) var isPrivacyFilterOn = AppConstants.privacyFilter
@@ -43,6 +44,20 @@ struct CaptureView: View {
     /// where `totalVertices` already starts high (would otherwise never cross an absolute threshold).
     @State var verticesAtRecordStart = 0
     @State var isRecording = false
+    /// Focus scan: the still-capture branch of a rescan (see CaptureView+StillCapture).
+    @State var stillCapture = ARStillCaptureController()
+    @State var isStillCapturing = false
+    /// Focus scan: the region's box in the loaded map's raw frame (refreshFocusBoxPlacement, off
+    /// the body: it reads the map scan's registration sidecar).
+    @State var focusBoxPlacement: FocusBoxPlacement?
+    /// Focus scan: where the capture files, snapshotted at Start, so leaving the tab (which resets
+    /// the capture state) cannot strand the stills.
+    @State var focusScanTarget: FocusScanTarget?
+    /// Recording a room scan or capturing a focus scan. The one state the pre-record safeguards read
+    /// (relocalization watchdog, Try Again, Re-relocalize, idle teardown, the leave-capture config
+    /// swap): each of those reloads the map or swaps the configuration, which mid-capture resets
+    /// tracking or drops scene depth.
+    var isCapturing: Bool { isRecording || isStillCapturing }
     // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
     // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
     @State var vioCompromised = false
@@ -54,8 +69,6 @@ struct CaptureView: View {
     @State var recordingSeconds = 0
     @State var recordingTimer: Timer?
     @State var frameCaptureSession = FrameCaptureSession()
-    /// Opacity of the white shutter-flash overlay shown when a sharp keyframe is captured.
-    @State private var captureFlashOpacity: Double = 0
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
     /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
     /// jetsam limit — the redline trip-flag. No-op unless Perf Diagnostics is on.
@@ -104,7 +117,6 @@ struct CaptureView: View {
     @State var messageVersion = 0
     @State var hapticGenerator = UIImpactFeedbackGenerator(style: .medium)
 
-    @State var showExtendPrompt = false
     @State var showExtendOverlay = false // Semi-transparent overlay during Pin & Extend save
     @State var extendPhaseText = "" // Text shown in the extend overlay
     @State var showInsufficientTrackingAlert = false // SwiftUI alert for poor mapping status
@@ -114,7 +126,6 @@ struct CaptureView: View {
     @State var showStopMenu = false
     @State var showDiscardConfirm = false // destructive Discard from the stop menu → confirm first
     @State var showPendingDiscardConfirm = false // destructive Discard from the naming dialog → confirm first
-    @State var showExtendErrorAlert = false
     @State var isAwaitingAlignment = false // Phase 2.1 (perfDiag): briefly holding record for the auto-align correction
 
     @State private var showSettings = false
@@ -140,6 +151,7 @@ struct CaptureView: View {
     @State var scanCoach = ScanCoach()
     @AppStorage(AppConstants.Key.scanCoachingEnabled) var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
+    @AppStorage(AppConstants.Key.sweepCoverageLiveReadout) private var sweepCoverageLiveReadout: Bool = AppConstants.sweepCoverageLiveReadout
 
     // MARK: - Space Analysis (pre-scan staging check)
     @State var isAnalyzing = false
@@ -165,6 +177,9 @@ struct CaptureView: View {
         let worldMapURL: URL?
         let thumbnailData: Data?
         let scanCase: ScanCase
+        // Sweep-coverage grid frozen at the Stop tap; nil only when the capture view was gone.
+        // A `let` with no default so the memberwise init makes every construction site decide.
+        let sweepCoverage: SweepCoverageSnapshot?
         // Map saved with a wandering outlier cluster in its feature cloud (tracking excursion,
         // e.g. an OS interruption with motion) — persisted so rescan/link can warn (default lets
         // the VIO-recovery construction sites, which save no map, omit it).
@@ -533,11 +548,11 @@ struct CaptureView: View {
         // via the rescan→latest chain). Today rescan always targets latest, so this aggregates all —
         // but if a non-latest scan ever becomes the target, restrict to ITS connectors so we never
         // render another scan's connectors in the wrong frame (the failure the comment above warns of).
-        let latestId = location.scans.max(by: { $0.capturedAt < $1.capturedAt })?.id
+        let latestId = location.latestRoomScan?.id
         let target = scanStore.activeScanToExtend
         let scansForConnectors: [CapturedScan] = (target == nil || target == latestId)
-            ? location.scans
-            : location.scans.filter { $0.id == target }
+            ? location.roomScans
+            : location.roomScans.filter { $0.id == target }
         var seenConnectors = Set<UUID>()
         connectorAnchors = scansForConnectors
             .flatMap { StitchLinkStore.connectorAnchors(for: $0, from: linkIndex[$0.id] ?? []) }
@@ -551,8 +566,9 @@ struct CaptureView: View {
     /// flips); it stands down — and clears any timed-out flag — the moment relocalization succeeds
     /// (`.normal`), recording starts, or the ghost is cleared.
     private func evaluateRelocalizationTimeout() {
+        // Stands down while capturing: its Try Again reloads the map.
         let relocalizing = cachedGhostMeshData != nil
-            && !isRecording
+            && !isCapturing
             && scanStats.trackingStatus == .limited(reason: .relocalizing)
         if relocalizing {
             // Arm once. Don't restart if already running or already timed out.
@@ -563,7 +579,7 @@ struct CaptureView: View {
             ) { _ in
                 // Fires on the main run loop. Re-check we're still stuck (a success/back-out would
                 // have cancelled us via onChange, but guard against the race).
-                if cachedGhostMeshData != nil && !isRecording
+                if cachedGhostMeshData != nil && !isCapturing
                     && scanStats.trackingStatus == .limited(reason: .relocalizing) {
                     relocTimedOut = true
                 }
@@ -583,6 +599,7 @@ struct CaptureView: View {
     /// "Try Again" — restart relocalization from scratch by reloading the world map (toggling the
     /// ghost data, the proven `showRelocDialog` Re-relocalize path). Re-arms the watchdog.
     private func retryRelocalization() {
+        guard !isCapturing else { return }   // a map reload mid-capture resets tracking
         relocTimeoutTimer?.invalidate()
         relocTimeoutTimer = nil
         relocTimedOut = false
@@ -646,7 +663,10 @@ struct CaptureView: View {
                 dismissGhostMesh: dismissGhostMesh,
                 bakedGhostTransform: bakedGhostTransform,
                 pauseARSession: pauseARSession,
-                isAnalyzing: $isAnalyzing
+                isAnalyzing: $isAnalyzing,
+                isStillCapturing: isStillCapturing,
+                stillCapture: stillCapture.engine,
+                focusBox: focusBoxPlacement
             )
         .alert(rigMeasuredDyMeters < 0.01 ? "Rig height not set" : "Rig height looks wrong",
                isPresented: $showRigHeightPrompt) {
@@ -692,740 +712,217 @@ struct CaptureView: View {
         }
     }
 
+    /// Composed from four independently type-checked pieces (#56).
+    ///
+    /// Measured with `-Xfrontend -warn-long-function-bodies`, this getter cost
+    /// **17,496 ms** — by far the most expensive property in the project, and one modifier
+    /// away from "unable to type-check this expression in reasonable time" (which has
+    /// already bitten this file twice). The cost was NOT the 1,000 lines of children:
+    /// extracting 550 of them into properties moved the number by less than the ±1.5 s
+    /// build-to-build noise. It was the **21 modifiers chained onto the root**, each
+    /// wrapping the view in another generic layer for the solver to unify.
+    ///
+    /// So the split is by MODIFIER GROUP, not by subview. Each helper returns an opaque
+    /// `some View`, so its chain is solved once, on its own, and `body` sees a single type.
+    /// Order is semantic — SwiftUI applies modifiers outward — so keep it: root, then
+    /// lifecycle, then dialogs, then observers. Add new modifiers INSIDE the matching
+    /// helper; a new one here costs the whole getter again.
     var body: some View {
-        ZStack {
-            // Live ARKit Scene Reconstruction View
-            arCoverageLayer
-                .ignoresSafeArea()
-                // Shutter tap — the deterministic still trigger, gated on stillness.
-                // Attached to the AR view (behind the HUD) so buttons keep their own
-                // taps; fires nothing unless recording. A warning haptic answers taps
-                // while moving ("hold still first"); capture feedback (shutter click +
-                // flash) comes from the accepted save itself.
-                //
-                // MERGE FUSION (still-source-360 × capture-quality): an ACCEPTED tap also
-                // fires the Theta 360° still (inert when no camera is connected), so each
-                // stillness pause yields a co-timed phone-hi-res + 360° pair with a shared
-                // phone pose — the calibration raw material this branch exists for. A
-                // refused tap fires neither, keeping the pair invariant.
-                .onTapGesture {
-                    guard isRecording else { return }
-                    if frameCaptureSession.requestStillCapture() {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        captureThetaStill()
-                    } else {
-                        UINotificationFeedbackGenerator().notificationOccurred(.warning)
-                    }
-                }
-                // Fix phase race: set .loadingWorldMap before the AR session starts
-                // loading the world map. onAppear fires AFTER the first render, so
-                // the AR view could detect a boundary anchor before the phase is set.
-                .onAppear {
-                    if scanStore.activeScanCase == .linkAdjacent && scanStore.activeScanToExtend != nil
-                        && scanStore.capturePhase == .idle {
-                        scanStore.capturePhase = .loadingWorldMap
-                    }
-                }
-                // Main's VIO-loss guard: halt + prompt save/rescan when tracking is lost mid-scan.
-                .onChange(of: vioCompromised) { _, lost in
-                    if lost { handleVIOCompromised() }
-                }
-                // The AR view's mid-recording notice channel: message only, never capture state.
-                // Carries ARKit purging the mesh after a tracking correction (recoverable by
-                // re-sweeping, but only if the operator finds out NOW rather than at Process) and a
-                // record-start world-map load failure. Both are things the operator can only act on
-                // while still holding the device up.
-                .onChange(of: meshResetNotice) { _, notice in
-                    guard let notice else { return }
-                    showTransientMessage("⚠️ \(notice)", duration: 8)
-                    ThetaCameraManager.shared.playThetaSwayWarnCue()
-                    meshResetNotice = nil
-                }
+        captureObservers(captureDialogs(captureLifecycle(captureRoot)))
+    }
 
-            // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)
-            if !isARSessionReady {
-                ZStack {
-                    Color.black.ignoresSafeArea()
-                    VStack(spacing: 16) {
-                        ProgressView()
-                            .scaleEffect(1.5)
-                            .tint(.cyan)
-                        Text("Initializing AR Session…")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                    }
+    /// The layered capture UI itself — AR view, chrome, and the modal overlays.
+    private var captureRoot: some View {
+    ZStack {
+        // Live ARKit Scene Reconstruction View
+        arCoverageLayer
+            .ignoresSafeArea()
+            // Shutter tap — the deterministic still trigger, gated on stillness.
+            // Attached to the AR view (behind the HUD) so buttons keep their own
+            // taps; fires nothing unless recording. A warning haptic answers taps
+            // while moving ("hold still first"); capture feedback (shutter click +
+            // flash) comes from the accepted save itself.
+            //
+            // MERGE FUSION (still-source-360 × capture-quality): an ACCEPTED tap also
+            // fires the Theta 360° still (inert when no camera is connected), so each
+            // stillness pause yields a co-timed phone-hi-res + 360° pair with a shared
+            // phone pose — the calibration raw material this branch exists for. A
+            // refused tap fires neither, keeping the pair invariant.
+            //
+            // Automatic room stills (docs/design/capture-modes.md): phone stills fire on their
+            // own, so the tap is the 360° rig's shutter only. With a camera connected it still
+            // arms the phone still too, keeping the co-timed pair the rig calibration needs.
+            .onTapGesture {
+                guard isRecording, thetaManager.isConnected else { return }
+                if frameCaptureSession.requestStillCapture() {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    captureThetaStill()
+                } else {
+                    UINotificationFeedbackGenerator().notificationOccurred(.warning)
                 }
-                .transition(.opacity)
+            }
+            // Fix phase race: set .loadingWorldMap before the AR session starts
+            // loading the world map. onAppear fires AFTER the first render, so
+            // the AR view could detect a boundary anchor before the phase is set.
+            .onAppear {
+                if scanStore.activeScanCase == .linkAdjacent && scanStore.activeScanToExtend != nil
+                    && scanStore.capturePhase == .idle {
+                    scanStore.capturePhase = .loadingWorldMap
+                }
+            }
+            // Main's VIO-loss guard: halt + prompt save/rescan when tracking is lost mid-scan.
+            .onChange(of: vioCompromised) { _, lost in
+                if lost { handleVIOCompromised() }
+            }
+            // The AR view's mid-recording notice channel: message only, never capture state.
+            // Carries ARKit purging the mesh after a tracking correction (recoverable by
+            // re-sweeping, but only if the operator finds out NOW rather than at Process) and a
+            // record-start world-map load failure. Both are things the operator can only act on
+            // while still holding the device up.
+            .onChange(of: meshResetNotice) { _, notice in
+                guard let notice else { return }
+                showTransientMessage("⚠️ \(notice)", duration: 8)
+                ThetaCameraManager.shared.playThetaSwayWarnCue()
+                meshResetNotice = nil
             }
 
-            // Live privacy indicator (shown when privacy filter is on AND recording in AR mode).
-            // A cheap red-eye marker over each person region, driven by ARKit's existing
-            // segmentation stencil — NOT the old per-tick Vision pass + pixelate render (which
-            // competed with VIO). Saved RGB frames are still blurred; this is just the live signal.
-            // In VR mode the point cloud already shows person-shaped holes as the indicator.
-            if isPrivacyFilterOn && isRecording && (AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar) != .vr {
-                PrivacyEyeOverlay(arSession: currentARSession)
-                    .ignoresSafeArea()
-            }
-
-            // Permissions Overlay (Preempts user if not authorized)
-            PermissionsOverlay(locationManager: locationManager)
-                .ignoresSafeArea()
-
-            // Stillness reticle — the hold-still-then-tap affordance. The ring fills as
-            // the device settles, locks green when a shutter tap will capture, and shows
-            // "Capturing…" while a tapped still is in flight. Shown in both AR and VR
-            // modes: keyframes are captured in both. Wrapped in a host view so the 10Hz
-            // progress updates re-evaluate only the reticle's body, not this entire view.
-            if isRecording && isARSessionReady {
-                StillnessReticleHost(session: frameCaptureSession)
-                    .allowsHitTesting(false)
-            }
-
-            // 360° capture cue: the visual half of the audio sequence, so a muted iPad
-            // (no haptics either) still shows when to hold and when it's safe to move.
-            // Hosted like the reticle so only its own body re-evaluates.
-            if isRecording, thetaManager.isConnected {
-                ThetaCaptureCueHost(manager: thetaManager)
-            }
-
-            // Centered startup/tracking pills (kept separate from ScanCoach)
-            centeredTrackingPills
-
-            // Lite mode banner for non-LiDAR devices. Top-aligned: unanchored it sat at the
-            // ZStack's vertical center — directly over the stillness reticle (2026-07-22 field
-            // report from the iPhone Lite pass).
-            if !ARCoverageView.supportsLiDAR {
-                HStack(spacing: 6) {
-                    Image(systemName: "info.circle.fill")
-                    Text("Lite Mode — Capturing images only (no depth/mesh)")
-                }
-                .font(.caption)
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Color.blue.opacity(0.75))
-                .cornerRadius(16)
-                .padding(.top, 60)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-
-            VStack {
-                // Scan Mode Prompt (transient)
-                if showExtendPrompt {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(scanStore.activeScanCase == .linkAdjacent ? "Connect Adjacent Space" : "Rescan Space")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            Text(scanStore.activeScanCase == .linkAdjacent
-                                 ? """
-                                   Connect Adjacent Space: Relocalize with the \
-                                   previous scan, walk to where the new connector should be, and \
-                                   confirm to connect this adjacent \
-                                   space.
-                                   """
-                                 : """
-                                   Rescan Space: Re-scan the previous area \
-                                   to capture changes over time.
-                                   """)
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.8))
-                        }
-                        Spacer()
-                        Button(action: { showExtendPrompt = false }, label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.title2)
-                                .foregroundColor(.white.opacity(0.6))
-                        })
-                    }
-                    .padding()
-                    .background(Color.indigo.opacity(0.9))
-                    .cornerRadius(16)
-                    .padding(.horizontal)
-                    .padding(.top, developerMode ? 60 : 20) // Leave room for top controls
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .animation(.spring(), value: showExtendPrompt)
-                }
-
-                // Top Controls
-                HStack {
-                    PrivacyFilterPill(isOn: $isPrivacyFilterOn,
-                                      locked: isRecording,
-                                      show360Note: thetaManager.isConnected)
-
-                    Spacer()
-
-                    // Recording indicator
-                    if isRecording {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(Color.red)
-                                .frame(width: 10, height: 10)
-                            Text("REC \(formattedTime)")
-                                .font(.caption).bold()
-                                .foregroundColor(.white)
-
-                            // Sharp frame counter — shows frames captured while device was still
-                            if frameCaptureSession.sharpFrameCount > 0 {
-                                Divider()
-                                    .frame(height: 12)
-                                    .background(Color.white.opacity(0.5))
-                                HStack(spacing: 3) {
-                                    Image(systemName: "camera.fill")
-                                        .font(.caption2)
-                                    Text("\(frameCaptureSession.sharpFrameCount)")
-                                        .font(.caption).bold()
-                                }
-                                .foregroundColor(.green)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.red.opacity(0.3))
-                        .cornerRadius(20)
-                    } else {
-                        Button(action: { showSettings = true }, label: {
-                            Image(systemName: "gearshape.fill")
-                                .font(.title3)
-                                .foregroundColor(.white)
-                                .padding(10)
-                                .background(.ultraThinMaterial)
-                                .clipShape(Circle())
-                        })
-                    }
-
-                }
-                .padding()
-
-                if let locName = activeLocationName {
-                    let modeText = scanStore.activeScanCase == .linkAdjacent ? "Connect Adjacent Space" : "Rescan Space"
-                    Text("\(locName) — \(modeText)")
-                        .font(.caption.bold())
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Color.black.opacity(0.6))
-                        .cornerRadius(16)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-
-                // Wearable PiP Overlay and Status Warnings
-                let wearableManager = MetaWearableManager.shared
-                if let firstDevice = wearableManager.connectedDevices.first {
-                    HStack {
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 6) {
-                            // Device Name Title
-                            Text(firstDevice.name)
-                                .font(.caption2).bold()
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.ultraThinMaterial)
-                                .cornerRadius(6)
-                                .padding(.trailing, AppConstants.UI.pipPaddingX)
-
-                            // Firmware compatibility warning (may be false positive in SDK 0.7.0)
-                            if wearableManager.deviceUpdateRequired {
-                                Button(action: {
-                                    wearableManager.openFirmwareUpdate()
-                                }, label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
-                                        Text("Device update needed — tap to open Meta App")
-                                    }
-                                    .font(.caption2).bold()
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(Color.orange.opacity(0.8))
-                                    .cornerRadius(8)
-                                })
-                                .padding(.trailing, AppConstants.UI.pipPaddingX)
-                            }
-
-                            // Status warnings when connected but no proxy image is flowing
-                            if wearableManager.latestProxyImage == nil {
-                                if wearableManager.connectionFailed {
-                                    // DeviceSession timed out — show retry action
-                                    Button(action: {
-                                        wearableManager.connectionFailed = false
-                                        wearableManager.stopStreaming()
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                            wearableManager.startStreaming()
-                                        }
-                                    }, label: {
-                                        HStack(spacing: 6) {
-                                            Image(systemName: "arrow.clockwise.circle.fill").foregroundColor(.orange)
-                                            Text("Connection failed — tap to retry")
-                                        }
-                                        .font(.caption2).bold()
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .background(Color.orange.opacity(0.7))
-                                        .cornerRadius(8)
-                                    })
-                                    .padding(.trailing, AppConstants.UI.pipPaddingX)
-                                } else {
-                                    HStack(spacing: 6) {
-                                        if !wearableManager.permissionGranted {
-                                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
-                                            Text("Meta App Permission Required")
-                                        } else if !wearableManager.isStreaming {
-                                            ProgressView().scaleEffect(0.7).tint(.white)
-                                            Text("Starting stream...")
-                                        } else {
-                                            ProgressView().scaleEffect(0.7).tint(.white)
-                                            Text("Waiting for frames...")
-                                        }
-                                    }
-                                    .font(.caption2).bold()
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(.ultraThinMaterial)
-                                    .cornerRadius(8)
-                                    .padding(.trailing, AppConstants.UI.pipPaddingX)
-                                }
-                            }
-
-                            // The actual PiP video feed
-                            if let pipImage = wearableManager.latestProxyImage {
-                                Image(uiImage: pipImage)
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: AppConstants.UI.pipWidth, height: AppConstants.UI.pipHeight)
-                                    .clipShape(RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius)
-                                            .stroke(Color.white.opacity(0.5), lineWidth: AppConstants.UI.pipBorderWidth)
-                                    )
-                                    .shadow(radius: 5)
-                                    .padding(.trailing, AppConstants.UI.pipPaddingX)
-                            }
-                        }
-                    }
-                } else if thetaManager.isConnected {
-                    // 360° source chip — same corner as the wearable PiP (the two capture
-                    // sources are mutually exclusive): which camera feeds this scan, and
-                    // whether its rig pose is calibrated. Turns orange for the rest of the
-                    // scan if the first-still spot-check flags drift (the transient toast
-                    // alone was easy to miss).
-                    HStack {
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 6) {
-                            Text("\(thetaManager.model ?? "360° camera")\(thetaManager.serialNumber.map { " · \($0)" } ?? "")")
-                                .font(.caption2).bold()
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.ultraThinMaterial)
-                                .cornerRadius(6)
-
-                            thetaCalibrationChip
-
-                            thetaRigHeightChip
-
-                            if isRecording {
-                                thetaSufficiencyChip
-                            }
-                        }
-                        .padding(.trailing, AppConstants.UI.pipPaddingX)
-                    }
-                }
-
-                Spacer()
-
-                // ScanCoach Bar (above HUD, only during recording)
-                if isRecording {
-                    CoachBarView(tip: scanCoach.currentTip) {
-                        scanCoach.dismissCurrentTip()
-                    }
-                }
-
-                // Bottom HUD and Capture Button
-                VStack {
-                    ZStack(alignment: .bottom) {
-                        // HUD background with live stats (only during recording)
-                        if isRecording {
-                            CaptureStatsHUD(scanStats: scanStats, frameCaptureSession: frameCaptureSession)
-                        }
-
-                        // Capture Button + Analyze Space Button
-                        HStack(spacing: 24) {
-                            // Analyze Space button — visible when not recording
-                            if !isRecording {
-                                Button(action: { startAnalysis() }, label: {
-                                    VStack(spacing: 4) {
-                                        Image(systemName: "scope")
-                                            .font(.system(size: 22))
-                                            .foregroundColor(.cyan)
-                                            .frame(width: 44, height: 44)
-                                            .background(.ultraThinMaterial)
-                                            .clipShape(Circle())
-                                            .overlay(Circle().stroke(Color.cyan.opacity(0.5), lineWidth: 1))
-                                        Text("Analyze")
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.white.opacity(0.7))
-                                    }
-                                })
-                                .disabled(isAnalyzing || isProcessingMesh || isWaitingToSave)
-                                .opacity(isAnalyzing ? 0.4 : 1.0)
-                            }
-
-                            // Record button
-                            Button(action: { toggleRecording() }, label: {
-                                ZStack {
-                                    Circle()
-                                        .fill(.ultraThinMaterial)
-                                        .frame(width: 80, height: 80)
-                                        .overlay(Circle().stroke(isRecording ? Color.red : Color.cyan, lineWidth: 2))
-
-                                    if isRecording {
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .fill(Color.red)
-                                            .frame(width: 28, height: 28)
-                                    } else if isProcessingMesh || isWaitingToSave {
-                                        // Previous scan's export/coloring still running — recording is
-                                        // blocked until it finishes. Show a spinner so the disabled button
-                                        // isn't a silent dead tap (a spinner that never clears = a stuck
-                                        // isProcessingMesh/isWaitingToSave reset, a separate bug).
-                                        ProgressView().tint(.white)
-                                    } else {
-                                        Circle()
-                                            .fill(Color.white)
-                                            .frame(width: 30, height: 30)
-                                    }
-
-                                    if let msg = saveMessage {
-                                        HStack(spacing: 4) {
-                                            if let icon = saveMessageIcon {
-                                                Image(systemName: icon.name).foregroundColor(icon.tint)
-                                            }
-                                            Text(msg)
-                                        }
-                                            .font(.caption2).bold()
-                                            .foregroundColor(.white)
-                                            .offset(y: 50)
-                                    } else {
-                                        Text(recordButtonCaption)
-                                            .font(.caption2)
-                                            .foregroundColor(.white.opacity(0.7))
-                                            .offset(y: 50)
-                                    }
-                                }
-                            })
-                            // After Stop, the mesh export/save runs while isRecording is already
-                            // false; block taps during that window so a new recording can't start
-                            // on top of the in-flight export. Also block during analysis.
-                            // And in a link-adjacent flow recording starts programmatically after
-                            // alignment, never from this button — disable it for the whole
-                            // pre-recording window so a tap can't race ahead of the alignment overlay
-                            // and start an un-aligned scan (the ~90°/offset ghost-jump race).
-                            // activeScanCase is set synchronously at the trigger; cleared on save.
-                            .disabled(isProcessingMesh || isWaitingToSave || isStabilizingBeforeSave || isAnalyzing || showAnalysisReport
-                                      || (scanStore.activeScanCase == .linkAdjacent && !isRecording))
-                            .offset(y: isRecording ? -20 : 0)
-                        }
-                    }
-                }
-                .padding(.bottom, 20)
-            }
-
-            // Analysis progress overlay (shown during the 360° sweep)
-            if isAnalyzing {
-                ZStack {
-                    Color.black.opacity(0.5).ignoresSafeArea()
-                    VStack(spacing: 20) {
-                        Image(systemName: "scope")
-                            .font(.system(size: 48))
-                            .foregroundColor(.cyan)
-                            .symbolEffect(.pulse, isActive: true)
-
-                        Text("Analyzing Space")
-                            .font(.title2.bold())
-                            .foregroundColor(.white)
-
-                        Text(spaceAnalyzer.progressLabel)
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.8))
-                            .multilineTextAlignment(.center)
-
-                        // Progress ring
-                        ZStack {
-                            Circle()
-                                .stroke(Color.white.opacity(0.2), lineWidth: 6)
-                            Circle()
-                                .trim(from: 0, to: CGFloat(spaceAnalyzer.progress))
-                                .stroke(Color.cyan, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                                .rotationEffect(.degrees(-90))
-                                .animation(.easeInOut(duration: 0.3), value: spaceAnalyzer.progress)
-                            Text("\(Int(spaceAnalyzer.progress * 100))%")
-                                .font(.title3.bold())
-                                .foregroundColor(.white)
-                        }
-                        .frame(width: 100, height: 100)
-
-                        Button("Cancel") {
-                            stopAnalysis(cancelled: true)
-                        }
+        // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)
+        if !isARSessionReady {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .tint(.cyan)
+                    Text("Initializing AR Session…")
                         .font(.subheadline)
-                        .foregroundColor(.white.opacity(0.7))
-                        .padding(.top, 8)
-                    }
+                        .foregroundColor(.gray)
                 }
-                .transition(.opacity)
-                .animation(.easeInOut(duration: 0.3), value: isAnalyzing)
             }
-            // Extend transition overlay (semi-transparent over live AR)
-            if showExtendOverlay {
-                ZStack {
-                    Color.black.opacity(0.6).ignoresSafeArea()
-                    VStack(spacing: 16) {
-                        ProgressView()
-                            .scaleEffect(1.5)
-                            .tint(.green)
-                        Label(extendPhaseText, systemImage: "mappin.and.ellipse")
-                            .labelStyle(.tintedIcon(.green))
-                            .font(.headline)
-                            .foregroundColor(.white)
-                            .multilineTextAlignment(.center)
-                        Text("Do not move")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.7))
-                    }
-                }
-                .transition(.opacity)
-                .animation(.easeInOut(duration: 0.3), value: showExtendOverlay)
-            }
+            .transition(.opacity)
+        }
 
-            // Phase 2.1 (perfDiag): briefly holding record while the auto-align correction lands.
-            awaitingAlignmentOverlay
-
-            // Alignment overlay for cross-session resume (Flow B)
-            if scanStore.capturePhase == .loadingWorldMap
-                || scanStore.capturePhase == .aligning
-                || scanStore.capturePhase == .alignedReady {
-                AlignmentOverlayView(
-                    scanStats: scanStats,
-                    onConfirm: { confirmAlignment() },
-                    onCancel: { cancelAlignment() }
-                )
-            }
-
-            // Stop Recording menu — anchored at the BOTTOM, just above the record button.
-            // Replaces a .confirmationDialog, which iPad rendered as a centered/top popover far
-            // from the record button the user just tapped. Same three actions.
-            if showStopMenu {
-                ZStack(alignment: .bottom) {
-                    Color.black.opacity(0.45)
-                        .ignoresSafeArea()
-                        .onTapGesture { showStopMenu = false }
-
-                    VStack(spacing: 12) {
-                        Text("Stop Recording")
-                            .font(.headline)
-                            .foregroundColor(.white)
-
-                        Button(action: {
-                            showStopMenu = false
-                            stopRecording()
-                        }, label: {
-                            Text("Save & End")
-                                .font(.body.bold())
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 14)
-                                .background(Color.cyan.opacity(0.85))
-                                .foregroundColor(.white)
-                                .cornerRadius(14)
-                        })
-
-                        // Offered for new scans and extend legs (chaining rooms). Hidden for a
-                        // rescan of an existing space (activeScanToExtend set): its purpose is
-                        // refreshing that space's map, not growing the link graph from it.
-                        if !(scanStore.activeScanCase == .rescanSpace && scanStore.activeScanToExtend != nil) {
-                            Button(action: {
-                                showStopMenu = false
-                                if scanStats.hasEnoughFeaturesForRelocalization {
-                                    pinAndExtend()
-                                } else {
-                                    showExtendErrorAlert = true
-                                }
-                            }, label: {
-                                Text("Save & Scan Adjacent")
-                                    .font(.body.bold())
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
-                                    .background(Color.indigo.opacity(0.85))
-                                    .foregroundColor(.white)
-                                    .cornerRadius(14)
-                            })
-                        }
-
-                        Button(action: {
-                            showStopMenu = false
-                            showDiscardConfirm = true
-                        }, label: {
-                            Text("Discard Scan")
-                                .font(.body.bold())
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 14)
-                                .background(Color.red.opacity(0.8))
-                                .foregroundColor(.white)
-                                .cornerRadius(14)
-                        })
-
-                        Button(action: { showStopMenu = false }, label: {
-                            Text("Cancel")
-                                .font(.body)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 14)
-                                .background(.ultraThinMaterial)
-                                .foregroundColor(.white)
-                                .cornerRadius(14)
-                        })
-                    }
-                    .padding(20)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(24)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 130) // sit just above the record button
-                }
-                .transition(.opacity)
-                .animation(.easeInOut(duration: 0.2), value: showStopMenu)
-                .zIndex(10)
-            }
-
-            // Ghost-mesh manual nudger (restored from main): a bottom-left status chip that opens an
-            // alignment dialog, plus a slider overlay to rotate/translate the ghost when
-            // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
-            // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
-            if cachedGhostMeshData != nil && !dismissGhostMesh {
-                ghostMeshChipStack
-            }
-
-            // Manual alignment slider overlay
-            if showManualAdjust && cachedGhostMeshData != nil && !dismissGhostMesh {
-                VStack {
-                    Spacer()
-                    VStack(spacing: 12) {
-                        HStack {
-                            Text("Manual Alignment")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            Spacer()
-                            Button("Done") {
-                                showManualAdjust = false
-                            }
-                            .font(.subheadline.bold())
-                            .foregroundColor(.cyan)
-                        }
-
-                        VStack(spacing: 8) {
-                            HStack {
-                                Image(systemName: "rotate.3d")
-                                    .frame(width: 24)
-                                Text("Y Rotation")
-                                    .font(.caption)
-                                    .frame(width: 70, alignment: .leading)
-                                Slider(value: Binding(
-                                    get: { Double(ghostYRotation) },
-                                    set: { ghostYRotation = Float($0) }
-                                ), in: -0.524...0.524) // ±30°
-                                Text("\(Int(ghostYRotation * 180 / .pi))°")
-                                    .font(.caption.monospacedDigit())
-                                    .frame(width: 40, alignment: .trailing)
-                            }
-                            .foregroundColor(.white)
-
-                            HStack {
-                                Image(systemName: "arrow.left.and.right")
-                                    .frame(width: 24)
-                                Text("X Position")
-                                    .font(.caption)
-                                    .frame(width: 70, alignment: .leading)
-                                Slider(value: Binding(
-                                    get: { Double(ghostXOffset) },
-                                    set: { ghostXOffset = Float($0) }
-                                ), in: -1.0...1.0)
-                                Text(String(format: "%.2fm", ghostXOffset))
-                                    .font(.caption.monospacedDigit())
-                                    .frame(width: 50, alignment: .trailing)
-                            }
-                            .foregroundColor(.white)
-
-                            HStack {
-                                Image(systemName: "arrow.up.and.down")
-                                    .frame(width: 24)
-                                Text("Z Position")
-                                    .font(.caption)
-                                    .frame(width: 70, alignment: .leading)
-                                Slider(value: Binding(
-                                    get: { Double(ghostZOffset) },
-                                    set: { ghostZOffset = Float($0) }
-                                ), in: -1.0...1.0)
-                                Text(String(format: "%.2fm", ghostZOffset))
-                                    .font(.caption.monospacedDigit())
-                                    .frame(width: 50, alignment: .trailing)
-                            }
-                            .foregroundColor(.white)
-                        }
-
-                        Button(action: {
-                            ghostYRotation = 0
-                            ghostXOffset = 0
-                            ghostZOffset = 0
-                        }, label: {
-                            Text("Reset to Default")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        })
-                    }
-                    .padding()
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(16)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 160)
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .animation(.spring(), value: showManualAdjust)
-            }
-
-            // Keyframe capture flash — a brief white blink (camera-app shutter language)
-            // each time a sharp keyframe is saved. Drawn last so it covers the full view.
-            Color.white
-                .opacity(captureFlashOpacity)
+        // Live privacy indicator (shown when privacy filter is on AND recording in AR mode).
+        // A cheap red-eye marker over each person region, driven by ARKit's existing
+        // segmentation stencil — NOT the old per-tick Vision pass + pixelate render (which
+        // competed with VIO). Saved RGB frames are still blurred; this is just the live signal.
+        // In VR mode the point cloud already shows person-shaped holes as the indicator.
+        if isPrivacyFilterOn && isRecording && (AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar) != .vr {
+            PrivacyEyeOverlay(arSession: currentARSession)
                 .ignoresSafeArea()
+        }
+
+        // Permissions Overlay (Preempts user if not authorized)
+        PermissionsOverlay(locationManager: locationManager)
+            .ignoresSafeArea()
+
+        // Stillness reticle — the hold-still-then-tap affordance. The ring fills as
+        // the device settles, locks green when a shutter tap will capture, and shows
+        // "Capturing…" while a tapped still is in flight. Shown in both AR and VR
+        // modes: keyframes are captured in both. Wrapped in a host view so the 10Hz
+        // progress updates re-evaluate only the reticle's body, not this entire view.
+        // Only with a 360° camera connected: phone stills are otherwise automatic, and the
+        // tap is the rig's shutter alone.
+        if isRecording && isARSessionReady && thetaManager.isConnected {
+            StillnessReticleHost(session: frameCaptureSession)
                 .allowsHitTesting(false)
         }
-        .onChange(of: frameCaptureSession.sharpFrameCount) { oldCount, newCount in
-            guard newCount > oldCount else { return } // ignore session-start reset to 0
-            // Two-phase so the peak actually renders: commit the peak opacity this
-            // update, then animate down on the next runloop turn — writing both in one
-            // transaction can coalesce to 0→0 and skip the flash entirely.
-            captureFlashOpacity = AppConstants.captureFlashOpacity
-            DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: AppConstants.captureFlashDuration)) {
-                    captureFlashOpacity = 0
-                }
-            }
+
+        // 360° capture cue: the visual half of the audio sequence, so a muted iPad
+        // (no haptics either) still shows when to hold and when it's safe to move.
+        // Hosted like the reticle so only its own body re-evaluates.
+        if isRecording, thetaManager.isConnected {
+            ThetaCaptureCueHost(manager: thetaManager)
         }
-        .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
-            Button("Re-relocalize") {
-                // Reset transform and reload the world map by toggling the ghost data.
-                ghostYRotation = 0
-                ghostXOffset = 0
-                ghostZOffset = 0
-                let savedData = cachedGhostMeshData
-                cachedGhostMeshData = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    cachedGhostMeshData = savedData
-                }
+
+        // Centered startup/tracking pills (kept separate from ScanCoach)
+        centeredTrackingPills
+
+        // Lite mode banner for non-LiDAR devices. Top-aligned: unanchored it sat at the
+        // ZStack's vertical center — directly over the stillness reticle (2026-07-22 field
+        // report from the iPhone Lite pass).
+        if !ARCoverageView.supportsLiDAR {
+            HStack(spacing: 6) {
+                Image(systemName: "info.circle.fill")
+                Text("Lite Mode — Capturing images only (no depth/mesh)")
             }
-            Button("Manual Adjust") {
-                showManualAdjust = true
+            .font(.caption)
+            .foregroundColor(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color.blue.opacity(0.75))
+            .cornerRadius(16)
+            .padding(.top, 60)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+
+        captureChromeOverlay
+
+        // Analysis progress overlay (shown during the 360° sweep)
+        analysisProgressOverlay
+        // Extend transition overlay (semi-transparent over live AR)
+        extendOverlay
+
+        // Phase 2.1 (perfDiag): briefly holding record while the auto-align correction lands.
+        awaitingAlignmentOverlay
+
+        // Alignment overlay for cross-session resume (Flow B)
+        if scanStore.capturePhase == .loadingWorldMap
+            || scanStore.capturePhase == .aligning
+            || scanStore.capturePhase == .alignedReady {
+            AlignmentOverlayView(
+                scanStats: scanStats,
+                onConfirm: { confirmAlignment() },
+                onCancel: { cancelAlignment() }
+            )
+        }
+
+        // Stop Recording menu — anchored at the BOTTOM, just above the record button.
+        // Replaces a .confirmationDialog, which iPad rendered as a centered/top popover far
+        // from the record button the user just tapped. Same three actions.
+        stopMenuOverlay
+
+        // Ghost-mesh manual nudger (restored from main): a bottom-left status chip that opens an
+        // alignment dialog, plus a slider overlay to rotate/translate the ghost when
+        // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
+        // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
+        // Hidden during a focus scan: the ghost only initializes the pose and leaves the scene at
+        // Start. (A room recording keeps the chip for Dismiss, the only action its dialog offers then.)
+        if cachedGhostMeshData != nil && !dismissGhostMesh && !isStillCapturing {
+            ghostMeshChipStack
+        }
+
+        // Manual alignment slider overlay
+        manualAdjustOverlay
+
+        // Still capture flash: a brief white blink (camera-app shutter language) for every saved
+        // still, so captures show even with the sound muted. Drawn last so it covers the full view;
+        // its own host, so a flash never re-evaluates this body.
+        CaptureFlashHost(frameCaptureSession: frameCaptureSession, stillCapture: stillCapture)
+    }
+    }
+
+    /// Appearance, appear/disappear wiring, and the ghost-alignment dialog.
+    private func captureLifecycle(_ content: some View) -> some View {
+        content
+        .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
+            // While capturing only Dismiss means anything: Re-relocalize would reset tracking mid-scan,
+            // and a manual nudge is baked in only at record start.
+            if !isCapturing {
+                Button("Re-relocalize") {
+                    // Reset transform and reload the world map by toggling the ghost data.
+                    ghostYRotation = 0
+                    ghostXOffset = 0
+                    ghostZOffset = 0
+                    let savedData = cachedGhostMeshData
+                    cachedGhostMeshData = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        cachedGhostMeshData = savedData
+                    }
+                }
+                Button("Manual Adjust") {
+                    showManualAdjust = true
+                }
             }
             Button("Dismiss Ghost Mesh", role: .destructive) {
                 dismissGhostMesh = true
@@ -1435,6 +932,12 @@ struct CaptureView: View {
             Text("The ghost mesh from your previous scan may not be perfectly aligned. Choose an option:")
         }
         .preferredColorScheme(.dark)
+        // Focus scan: the HUD, Check's auto-finish, the stop on a frame loss, and the region box.
+        // All in CaptureView+StillCapture (the stop's completion files the scan).
+        .overlay { stillCaptureOverlay }
+        .onChange(of: stillCapture.stats.stillsSaved) { _, saved in finishFocusScanIfTargetReached(saved) }
+        .onChange(of: stillCapture.stats.frameLost) { _, reason in handleFocusFrameLost(reason) }
+        .onChange(of: scanStore.activeFocusRequest) { _, _ in refreshFocusBoxPlacement() }
         .onAppear {
             // Pick up any Settings change to the diagnostics flag, then start the main-thread
             // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
@@ -1451,6 +954,7 @@ struct CaptureView: View {
             // the save-flow and tab-tap stalls it exists to catch happen outside capture.
             MainThreadWatchdog.shared.start()
             memoryPressureMonitor.start()
+            refreshFocusBoxPlacement()
 
             // Battery: returning to the capture tab — cancel any pending idle teardown and resume
             // the AR session if it was paused while we were away.
@@ -1462,6 +966,8 @@ struct CaptureView: View {
             // below restores its auto-sleep, mirroring the AR session's own ethos.
             thetaManager.setKeepAwake(true)
 
+            // The Privacy Filter's time limit (CaptureView+Privacy).
+            enforcePrivacyFilterRules()
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
                 if let loc = try? modelContext.fetch(descriptor).first {
@@ -1506,8 +1012,6 @@ struct CaptureView: View {
 
             // Start GPS/heading updates for scan metadata
             locationManager.startUpdating()
-
-            showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
             // Prepare haptic engine for pin drop
             hapticGenerator.prepare()
@@ -1556,7 +1060,7 @@ struct CaptureView: View {
                 // unused by the capture path, so gate on the flags this pipeline actually maintains:
                 // isProcessingMesh (export/color in flight) and a pendingScan awaiting its name/save.
                 let processing = isProcessingMesh || pendingScan != nil
-                if selectedTab != 1 && !isRecording && !processing && !scanStore.isProcessingScan {
+                if selectedTab != 1 && !isCapturing && !processing && !scanStore.isProcessingScan {
                     pauseARSession = true
                     // Same idle moment: let the camera nap too (sleepDelay restored).
                     Task { @MainActor in ThetaCameraManager.shared.setKeepAwake(false) }
@@ -1593,6 +1097,9 @@ struct CaptureView: View {
                 if isRecording {
                     stopRecording(force: true)
                 }
+                // Mid-focus-scan: finish it. The stills drain and file into the scan target
+                // snapshotted at Start (focusScanTarget), so the reset below cannot orphan them.
+                if isStillCapturing { stopStillCapture() }
                 // Always clear ghost state when leaving Capture.
                 // Preserve pendingStitchLink for in-flight saves — the async pipeline
                 // needs it to write stitching.json. It's consumed and nilled out by
@@ -1629,7 +1136,7 @@ struct CaptureView: View {
                 // still reads the live session's mesh anchors and exports its world map, and this
                 // config swap drops scene reconstruction. When something IS in flight the recording
                 // ends normally, and the stop/save teardown's purge covers it.
-                if !isRecording && !isProcessingMesh && pendingScan == nil && !scanStore.isProcessingScan {
+                if !isCapturing && !isProcessingMesh && pendingScan == nil && !scanStore.isProcessingScan {
                     currentARSession?.run(ARCoverageView.makeConfiguration())
                 }
                 showExtendOverlay = false
@@ -1645,6 +1152,11 @@ struct CaptureView: View {
                 relocTimedOut = false
             }
         }
+    }
+
+    /// Alerts and sheets: naming, discard, save/tracking failures, rig height, settings.
+    private func captureDialogs(_ content: some View) -> some View {
+        content
         .onChange(of: scanStore.activeLocationForScan) { _, newLocId in
             if let locId = newLocId {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
@@ -1654,6 +1166,10 @@ struct CaptureView: View {
             } else {
                 activeLocationName = nil
             }
+        }
+        .onChange(of: isPrivacyFilterOn) { _, isOn in PrivacyFilterTimer.noteSwitch(isOn: isOn) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { enforcePrivacyFilterRules() }
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
@@ -1708,11 +1224,6 @@ struct CaptureView: View {
                 + "don't track) — and sweep slowly until tracking improves, then stop again. Or discard "
                 + "and start over. Discarding deletes this recording's frames and photos and cannot be undone.")
         }
-        .alert("Not Enough Features", isPresented: $showExtendErrorAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("Move the device around to map more of the environment before placing a connector.")
-        }
         .sheet(isPresented: $showRigHeightSheet) {
             RigHeightSheet()
         }
@@ -1721,6 +1232,17 @@ struct CaptureView: View {
         }
         // ScanCoach evaluation: triggered by anchor count changes (~10Hz from ARKit,
         // but ScanCoach internally throttles to ~1Hz). Also clears tips when recording stops.
+    }
+
+    /// Scan-coach and space-analysis observers, and the analysis report sheet.
+    private func captureObservers(_ content: some View) -> some View {
+        content
+        // Keep the screen on while recording: automatic stills need no taps, and if the screen
+        // auto-locks iOS suspends the app and the scan ends. Covers every stop path (Stop, halt,
+        // discard), since all of them clear the flag.
+        .onChange(of: isCapturing, initial: true) { _, capturing in
+            ScreenAwake.set(ScreenAwake.captureHolder, held: capturing)
+        }
         .onChange(of: scanStats.anchorCount) {
             evaluateScanCoach()
         }
@@ -1765,6 +1287,568 @@ struct CaptureView: View {
         }
     }
 
+    /// The ghost-mesh manual-adjust overlay.
+    ///
+    /// One of the modal overlays split out of `body` for the Swift type checker (#56).
+    @ViewBuilder
+    private var manualAdjustOverlay: some View {
+        if showManualAdjust && cachedGhostMeshData != nil && !dismissGhostMesh {
+            VStack {
+                Spacer()
+                VStack(spacing: 12) {
+                    HStack {
+                        Text("Manual Alignment")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        Spacer()
+                        Button("Done") {
+                            showManualAdjust = false
+                        }
+                        .font(.subheadline.bold())
+                        .foregroundColor(.cyan)
+                    }
+
+                    VStack(spacing: 8) {
+                        HStack {
+                            Image(systemName: "rotate.3d")
+                                .frame(width: 24)
+                            Text("Y Rotation")
+                                .font(.caption)
+                                .frame(width: 70, alignment: .leading)
+                            Slider(value: Binding(
+                                get: { Double(ghostYRotation) },
+                                set: { ghostYRotation = Float($0) }
+                            ), in: -0.524...0.524) // ±30°
+                            Text("\(Int(ghostYRotation * 180 / .pi))°")
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                        .foregroundColor(.white)
+
+                        HStack {
+                            Image(systemName: "arrow.left.and.right")
+                                .frame(width: 24)
+                            Text("X Position")
+                                .font(.caption)
+                                .frame(width: 70, alignment: .leading)
+                            Slider(value: Binding(
+                                get: { Double(ghostXOffset) },
+                                set: { ghostXOffset = Float($0) }
+                            ), in: -1.0...1.0)
+                            Text(String(format: "%.2fm", ghostXOffset))
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 50, alignment: .trailing)
+                        }
+                        .foregroundColor(.white)
+
+                        HStack {
+                            Image(systemName: "arrow.up.and.down")
+                                .frame(width: 24)
+                            Text("Z Position")
+                                .font(.caption)
+                                .frame(width: 70, alignment: .leading)
+                            Slider(value: Binding(
+                                get: { Double(ghostZOffset) },
+                                set: { ghostZOffset = Float($0) }
+                            ), in: -1.0...1.0)
+                            Text(String(format: "%.2fm", ghostZOffset))
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 50, alignment: .trailing)
+                        }
+                        .foregroundColor(.white)
+                    }
+
+                    Button(action: {
+                        ghostYRotation = 0
+                        ghostXOffset = 0
+                        ghostZOffset = 0
+                    }, label: {
+                        Text("Reset to Default")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    })
+                }
+                .padding()
+                .background(.ultraThinMaterial)
+                .cornerRadius(16)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 160)
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .animation(.spring(), value: showManualAdjust)
+        }
+    }
+
+    /// The stop-recording menu.
+    ///
+    /// One of the modal overlays split out of `body` for the Swift type checker (#56).
+    @ViewBuilder
+    private var stopMenuOverlay: some View {
+        if showStopMenu {
+            ZStack(alignment: .bottom) {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture { showStopMenu = false }
+
+                VStack(spacing: 12) {
+                    Text("Stop Recording")
+                        .font(.headline)
+                        .foregroundColor(.white)
+
+                    Button(action: {
+                        showStopMenu = false
+                        stopRecording()
+                    }, label: {
+                        Text("Save & End")
+                            .font(.body.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color.cyan.opacity(0.85))
+                            .foregroundColor(.white)
+                            .cornerRadius(14)
+                    })
+
+                    // Offered for new scans and extend legs (chaining rooms). Hidden for a
+                    // rescan of an existing space (activeScanToExtend set): its purpose is
+                    // refreshing that space's map, not growing the link graph from it.
+                    if !(scanStore.activeScanCase == .rescanSpace && scanStore.activeScanToExtend != nil) {
+                        Button(action: {
+                            showStopMenu = false
+                            if scanStats.hasEnoughFeaturesForRelocalization {
+                                pinAndExtend()
+                            } else {
+                                showTransientMessage("Not enough mapped yet: move around to map more, then tap Save & Scan Adjacent again",
+                                                     duration: 4, systemImage: "exclamationmark.triangle.fill", tint: .orange)
+                            }
+                        }, label: {
+                            Text("Save & Scan Adjacent")
+                                .font(.body.bold())
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(Color.indigo.opacity(0.85))
+                                .foregroundColor(.white)
+                                .cornerRadius(14)
+                        })
+                    }
+
+                    Button(action: {
+                        showStopMenu = false
+                        showDiscardConfirm = true
+                    }, label: {
+                        Text("Discard Scan")
+                            .font(.body.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color.red.opacity(0.8))
+                            .foregroundColor(.white)
+                            .cornerRadius(14)
+                    })
+
+                    Button(action: { showStopMenu = false }, label: {
+                        Text("Cancel")
+                            .font(.body)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(.ultraThinMaterial)
+                            .foregroundColor(.white)
+                            .cornerRadius(14)
+                    })
+                }
+                .padding(20)
+                .background(.ultraThinMaterial)
+                .cornerRadius(24)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 130) // sit just above the record button
+            }
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.2), value: showStopMenu)
+            .zIndex(10)
+        }
+    }
+
+    /// The extend / rescan hand-off overlay.
+    ///
+    /// One of the modal overlays split out of `body` for the Swift type checker (#56).
+    @ViewBuilder
+    private var extendOverlay: some View {
+        if showExtendOverlay {
+            ZStack {
+                Color.black.opacity(0.6).ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .tint(.green)
+                    Label(extendPhaseText, systemImage: "mappin.and.ellipse")
+                        .labelStyle(.tintedIcon(.green))
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .multilineTextAlignment(.center)
+                    Text("Do not move")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.7))
+                }
+            }
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.3), value: showExtendOverlay)
+        }
+    }
+
+    /// The 360° sweep analysis-progress overlay.
+    ///
+    /// One of the modal overlays split out of `body` for the Swift type checker (#56).
+    @ViewBuilder
+    private var analysisProgressOverlay: some View {
+        if isAnalyzing {
+            ZStack {
+                Color.black.opacity(0.5).ignoresSafeArea()
+                VStack(spacing: 20) {
+                    Image(systemName: "scope")
+                        .font(.system(size: 48))
+                        .foregroundColor(.cyan)
+                        .symbolEffect(.pulse, isActive: true)
+
+                    Text("Analyzing Space")
+                        .font(.title2.bold())
+                        .foregroundColor(.white)
+
+                    Text(spaceAnalyzer.progressLabel)
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.8))
+                        .multilineTextAlignment(.center)
+
+                    // Progress ring
+                    ZStack {
+                        Circle()
+                            .stroke(Color.white.opacity(0.2), lineWidth: 6)
+                        Circle()
+                            .trim(from: 0, to: CGFloat(spaceAnalyzer.progress))
+                            .stroke(Color.cyan, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .animation(.easeInOut(duration: 0.3), value: spaceAnalyzer.progress)
+                        Text("\(Int(spaceAnalyzer.progress * 100))%")
+                            .font(.title3.bold())
+                            .foregroundColor(.white)
+                    }
+                    .frame(width: 100, height: 100)
+
+                    Button("Cancel") {
+                        stopAnalysis(cancelled: true)
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.7))
+                    .padding(.top, 8)
+                }
+            }
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.3), value: isAnalyzing)
+        }
+    }
+
+    /// The capture chrome layered over the AR view: the transient scan-mode prompt through
+    /// the record-button cluster.
+    ///
+    /// Extracted from `body` for the Swift type checker, not for tidiness (#56). Measured
+    /// with `-Xfrontend -warn-long-function-bodies`, `CaptureView.body` cost **17,496 ms**
+    /// to type-check — one property, and by far the most expensive in the project. A chain
+    /// that large sits one modifier away from "unable to type-check this expression in
+    /// reasonable time", which has already bitten this file (see `centeredTrackingPills`
+    /// below, and SettingsView). Put new chrome in here or a sibling property; do not let
+    /// `body` grow back.
+    @ViewBuilder
+    private var captureChromeOverlay: some View {
+        VStack {
+            // Top Controls
+            HStack {
+                PrivacyFilterPill(isOn: $isPrivacyFilterOn,
+                                  recording: isRecording,
+                                  show360Note: thetaManager.isConnected)
+
+                Spacer()
+
+                // Recording indicator
+                if isRecording {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 10, height: 10)
+                        Text("REC \(formattedTime)")
+                            .font(.caption).bold()
+                            .foregroundColor(.white)
+
+                        // Sharp frame counter — shows frames captured while device was still
+                        if frameCaptureSession.sharpFrameCount > 0 {
+                            Divider()
+                                .frame(height: 12)
+                                .background(Color.white.opacity(0.5))
+                            HStack(spacing: 3) {
+                                Image(systemName: "camera.fill")
+                                    .font(.caption2)
+                                Text("\(frameCaptureSession.sharpFrameCount)")
+                                    .font(.caption).bold()
+                            }
+                            .foregroundColor(.green)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.3))
+                    .cornerRadius(20)
+                } else {
+                    Button(action: { showSettings = true }, label: {
+                        Image(systemName: "gearshape.fill")
+                            .font(.title3)
+                            .foregroundColor(.white)
+                            .padding(10)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                    })
+                }
+
+            }
+            .padding()
+
+            if let locName = activeLocationName {
+                let modeText = scanStore.activeScanCase == .linkAdjacent ? "Connect Adjacent Space" : "Rescan Space"
+                Text("\(locName) — \(modeText)")
+                    .font(.caption.bold())
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.6))
+                    .cornerRadius(16)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            // Wearable PiP Overlay and Status Warnings
+            let wearableManager = MetaWearableManager.shared
+            if let firstDevice = wearableManager.connectedDevices.first {
+                HStack {
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 6) {
+                        // Device Name Title
+                        Text(firstDevice.name)
+                            .font(.caption2).bold()
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(6)
+                            .padding(.trailing, AppConstants.UI.pipPaddingX)
+
+                        // Firmware compatibility warning (may be false positive in SDK 0.7.0)
+                        if wearableManager.deviceUpdateRequired {
+                            Button(action: {
+                                wearableManager.openFirmwareUpdate()
+                            }, label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                                    Text("Device update needed — tap to open Meta App")
+                                }
+                                .font(.caption2).bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.orange.opacity(0.8))
+                                .cornerRadius(8)
+                            })
+                            .padding(.trailing, AppConstants.UI.pipPaddingX)
+                        }
+
+                        // Status warnings when connected but no proxy image is flowing
+                        if wearableManager.latestProxyImage == nil {
+                            if wearableManager.connectionFailed {
+                                // DeviceSession timed out — show retry action
+                                Button(action: {
+                                    wearableManager.connectionFailed = false
+                                    wearableManager.stopStreaming()
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                        wearableManager.startStreaming()
+                                    }
+                                }, label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "arrow.clockwise.circle.fill").foregroundColor(.orange)
+                                        Text("Connection failed — tap to retry")
+                                    }
+                                    .font(.caption2).bold()
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.orange.opacity(0.7))
+                                    .cornerRadius(8)
+                                })
+                                .padding(.trailing, AppConstants.UI.pipPaddingX)
+                            } else {
+                                HStack(spacing: 6) {
+                                    if !wearableManager.permissionGranted {
+                                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                                        Text("Meta App Permission Required")
+                                    } else if !wearableManager.isStreaming {
+                                        ProgressView().scaleEffect(0.7).tint(.white)
+                                        Text("Starting stream...")
+                                    } else {
+                                        ProgressView().scaleEffect(0.7).tint(.white)
+                                        Text("Waiting for frames...")
+                                    }
+                                }
+                                .font(.caption2).bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(8)
+                                .padding(.trailing, AppConstants.UI.pipPaddingX)
+                            }
+                        }
+
+                        // The actual PiP video feed
+                        if let pipImage = wearableManager.latestProxyImage {
+                            Image(uiImage: pipImage)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: AppConstants.UI.pipWidth, height: AppConstants.UI.pipHeight)
+                                .clipShape(RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius)
+                                        .stroke(Color.white.opacity(0.5), lineWidth: AppConstants.UI.pipBorderWidth)
+                                )
+                                .shadow(radius: 5)
+                                .padding(.trailing, AppConstants.UI.pipPaddingX)
+                        }
+                    }
+                }
+            } else if thetaManager.isConnected {
+                // 360° source chip — same corner as the wearable PiP (the two capture
+                // sources are mutually exclusive): which camera feeds this scan, and
+                // whether its rig pose is calibrated. Turns orange for the rest of the
+                // scan if the first-still spot-check flags drift (the transient toast
+                // alone was easy to miss).
+                HStack {
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 6) {
+                        Text("\(thetaManager.model ?? "360° camera")\(thetaManager.serialNumber.map { " · \($0)" } ?? "")")
+                            .font(.caption2).bold()
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(6)
+
+                        thetaCalibrationChip
+
+                        thetaRigHeightChip
+
+                        if isRecording {
+                            thetaSufficiencyChip
+                        }
+                    }
+                    .padding(.trailing, AppConstants.UI.pipPaddingX)
+                }
+            }
+
+            sweepCoverageReadoutRow
+
+            Spacer()
+
+            // ScanCoach Bar (above HUD, only during recording)
+            if isRecording {
+                CoachBarView(tip: scanCoach.currentTip) {
+                    scanCoach.dismissCurrentTip()
+                }
+            }
+
+            // Bottom HUD and Capture Button
+            VStack {
+                ZStack(alignment: .bottom) {
+                    // HUD background with live stats (only during recording)
+                    if isRecording {
+                        CaptureStatsHUD(scanStats: scanStats, frameCaptureSession: frameCaptureSession)
+                    }
+
+                    // Capture Button + Analyze Space Button
+                    HStack(spacing: 24) {
+                        // Analyze Space: only before a new space's scan. It re-runs the shared session
+                        // with RoomPlan, which upsets a rescan's or connect's relocalization and has
+                        // nothing to stage in a space already scanned (fix-localization-plan.md, the
+                        // 2026-07-07 decision), and a focus scan is a capture of its own.
+                        if !isCapturing && scanStore.activeScanToExtend == nil && cachedGhostMeshData == nil {
+                            Button(action: { startAnalysis() }, label: {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "scope")
+                                        .font(.system(size: 22))
+                                        .foregroundColor(.cyan)
+                                        .frame(width: 44, height: 44)
+                                        .background(.ultraThinMaterial)
+                                        .clipShape(Circle())
+                                        .overlay(Circle().stroke(Color.cyan.opacity(0.5), lineWidth: 1))
+                                    Text("Analyze")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.white.opacity(0.7))
+                                }
+                            })
+                            .disabled(isAnalyzing || isProcessingMesh || isWaitingToSave)
+                            .opacity(isAnalyzing ? 0.4 : 1.0)
+                        }
+
+                        // Record button
+                        Button(action: { toggleRecording() }, label: {
+                            ZStack {
+                                Circle()
+                                    .fill(.ultraThinMaterial)
+                                    .frame(width: 80, height: 80)
+                                    .overlay(Circle().stroke(isCapturing ? Color.red : Color.cyan, lineWidth: 2))
+
+                                if isCapturing {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(Color.red)
+                                        .frame(width: 28, height: 28)
+                                } else if isProcessingMesh || isWaitingToSave {
+                                    // Previous scan's export/coloring still running — recording is
+                                    // blocked until it finishes. Show a spinner so the disabled button
+                                    // isn't a silent dead tap (a spinner that never clears = a stuck
+                                    // isProcessingMesh/isWaitingToSave reset, a separate bug).
+                                    ProgressView().tint(.white)
+                                } else {
+                                    Circle()
+                                        .fill(Color.white)
+                                        .frame(width: 30, height: 30)
+                                }
+
+                                if let msg = saveMessage {
+                                    HStack(spacing: 4) {
+                                        if let icon = saveMessageIcon {
+                                            Image(systemName: icon.name).foregroundColor(icon.tint)
+                                        }
+                                        Text(msg)
+                                    }
+                                        .font(.caption2).bold()
+                                        .foregroundColor(.white)
+                                        .offset(y: 50)
+                                } else {
+                                    Text(recordButtonCaption)
+                                        .font(.caption2)
+                                        .foregroundColor(.white.opacity(0.7))
+                                        .offset(y: 50)
+                                }
+                            }
+                        })
+                        // After Stop, the mesh export/save runs while isRecording is already
+                        // false; block taps during that window so a new recording can't start
+                        // on top of the in-flight export. Also block during analysis.
+                        // And in a link-adjacent flow recording starts programmatically after
+                        // alignment, never from this button — disable it for the whole
+                        // pre-recording window so a tap can't race ahead of the alignment overlay
+                        // and start an un-aligned scan (the ~90°/offset ghost-jump race).
+                        // activeScanCase is set synchronously at the trigger; cleared on save.
+                        .disabled(isProcessingMesh || isWaitingToSave || isStabilizingBeforeSave || isAnalyzing || showAnalysisReport
+                                  || (scanStore.activeScanCase == .linkAdjacent && !isRecording))
+                        .offset(y: isRecording ? -20 : 0)
+                    }
+                }
+            }
+            .padding(.bottom, 20)
+        }
+    }
+
     /// Centered startup/tracking pills (kept separate from ScanCoach). Extracted from `body` to
     /// keep its expression type-checkable (the body ZStack is at the compiler's budget).
     private var centeredTrackingPills: some View {
@@ -1798,6 +1882,8 @@ struct CaptureView: View {
         // the meaningful transitions (loaded / cleared / reloaded).
         .onChange(of: cachedGhostMeshData?.count) { _, _ in evaluateRelocalizationTimeout() }
         .onChange(of: isRecording) { _, _ in evaluateRelocalizationTimeout() }
+        .onChange(of: isStillCapturing) { _, _ in evaluateRelocalizationTimeout() }
+        .onChange(of: isCapturing) { _, active in scanStore.isCaptureActive = active }
     }
 
     // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):
@@ -1817,6 +1903,26 @@ struct CaptureView: View {
                 .shadow(radius: 5)
                 .transition(.scale.combined(with: .opacity))
                 .animation(.easeInOut(duration: 0.2), value: unreliable)
+        }
+    }
+
+    /// Developer sweep-coverage readout (Perf Diagnostics › Live Coverage Readout): numbers only,
+    /// left edge, recording only. It sits in the top chrome's flow AFTER the privacy pill, the
+    /// location label and the trailing wearable/360° column, so it lands below whichever of
+    /// those are showing and cannot overlap them; its height comes out of the Spacer, so nothing
+    /// above or below moves. The left edge below the top chrome is the one region no recording
+    /// chrome uses: top-right is REC + the wearable/360° column, bottom-left the Ghost Mesh chip,
+    /// the bottom the coach bar + stats HUD, the center the reticle and tracking pills.
+    /// The perf half gates on `PerfDiag.enabled` (applied at capture entry, like the other
+    /// perfDiag-only chrome here). When either switch is off the readout is not in the tree at
+    /// all — no timer, no reads.
+    @ViewBuilder private var sweepCoverageReadoutRow: some View {
+        if isRecording, PerfDiag.enabled, sweepCoverageLiveReadout {
+            HStack {
+                SweepCoverageReadout(scanStore: scanStore)
+                Spacer()
+            }
+            .padding(.horizontal)
         }
     }
 
@@ -1846,8 +1952,9 @@ struct CaptureView: View {
     private var ghostMeshChipStack: some View {
         VStack {
             Spacer()
-            // Phase 2.1 (perfDiagnostics-only): "alignment sweep done — correction locked"
-            // cue. icpAlignReady is set only when a trusted ICP refine has converged during
+            // Phase 2.1: "alignment sweep done — correction locked" cue, shown to everyone (the
+            // "Aligning — wait for green" chip before it is Perf Diagnostics only).
+            // icpAlignReady is set only when a trusted ICP refine has converged during
             // the pre-record phase; its appearance tells the user it's safe to record (the
             // gravity-locked correction will bake into the world origin at record-start).
             if !isRecording, let align = scanStore.icpAlignReady {
@@ -1975,6 +2082,7 @@ struct CaptureView: View {
     /// Caption under the record button. A computed String (not a chained ternary in `body`) so the
     /// body expression stays type-checkable.
     private var recordButtonCaption: String {
+        if scanStore.activeScanKind == .focus { return isStillCapturing ? "Tap to stop focus scan" : "Tap to start focus scan" }
         if isRecording { return "Tap to stop" }
         if isProcessingMesh || isWaitingToSave { return "Processing previous scan…" }
         return "Tap to scan"
@@ -2123,12 +2231,16 @@ struct CaptureView: View {
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
                 self.discardInProgressScan(isExtendFlow: false, completion: nil)
             })
-        } else if capturedCount > 0 {
+        } else if capturedCount > 0 || scanStats.totalVertices > verticesAtRecordStart {
+            // Photos are automatic and start a few seconds in, so a scan can hold mesh before its
+            // first photo: that is still worth offering to save.
+            let captured = capturedCount > 0
+                ? "the \(capturedCount) photo\(capturedCount == 1 ? "" : "s") and mesh"
+                : "the mesh (no photos yet)"
             alert = UIAlertController(
                 title: "Tracking Lost",
                 message: "AR tracking was interrupted during this scan, so anything captured after that "
-                    + "point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") "
-                    + "captured so far, or discard and rescan?",
+                    + "point is unreliable. Save \(captured) captured so far, or discard and rescan?",
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
@@ -2363,10 +2475,11 @@ private struct CaptureStatsHUD: View {
 /// sees. LOCKED while recording: the setting must describe the whole scan as one binary state —
 /// a mid-scan flip half-masks the capture (segmentation masks exist only for the ON portion)
 /// while the exported `privacy_filter` flag records just the stop-time value, so the export
-/// blur gate would mis-reason about the unmasked half.
+/// blur gate would mis-reason about the unmasked half. Switched off, the filter turns itself
+/// back on after its time limit (PrivacyFilterTimer), which the warning says.
 private struct PrivacyFilterPill: View {
     @Binding var isOn: Bool
-    let locked: Bool
+    let recording: Bool
     let show360Note: Bool
 
     var body: some View {
@@ -2378,7 +2491,7 @@ private struct PrivacyFilterPill: View {
                 Toggle("", isOn: $isOn)
                     .labelsHidden()
                     .tint(.green)
-                    .disabled(locked)
+                    .disabled(recording)
             }
             if !isOn {
                 Text(warningText)
@@ -2392,7 +2505,9 @@ private struct PrivacyFilterPill: View {
         .background(.ultraThinMaterial)
         .cornerRadius(16)
         .frame(maxWidth: 260, alignment: .leading)
-        .opacity(locked ? 0.5 : 1)
+        // Dimmed while recording, but only to 75%: the off warning must stay readable mid-scan
+        // (field report 2026-11-11: at 50% it went unnoticed and scans caught too many people).
+        .opacity(recording ? 0.75 : 1)
         .animation(.easeInOut(duration: 0.2), value: isOn)
     }
 
@@ -2400,6 +2515,10 @@ private struct PrivacyFilterPill: View {
         var text = "People in view will be captured unblurred — moving people will corrupt texture maps."
         if show360Note {
             text += " The connected 360° camera captures ALL directions, including people behind you."
+        }
+        let limit = PrivacyFilterTimer.currentLimitDescription()
+        if limit != PrivacyFilterTimer.describe(hours: 0) {
+            text += " Turns back on by itself \(limit) after being switched off."
         }
         return text
     }
@@ -2409,9 +2528,9 @@ private struct PrivacyFilterPill: View {
     ZStack {
         Color.black.ignoresSafeArea()
         VStack(spacing: 12) {
-            PrivacyFilterPill(isOn: .constant(true), locked: false, show360Note: false)
-            PrivacyFilterPill(isOn: .constant(false), locked: false, show360Note: false)
-            PrivacyFilterPill(isOn: .constant(false), locked: true, show360Note: true)
+            PrivacyFilterPill(isOn: .constant(true), recording: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), recording: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), recording: true, show360Note: true)
         }
     }
 }

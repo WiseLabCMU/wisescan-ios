@@ -1,5 +1,5 @@
 //
-//  RigCalibrationSolver.swift
+//  RigModel.swift
 //
 //  What remains of the edge-cost solver after the photometric port (v15) retired it:
 //  the rig MODEL, which every consumer shares —
@@ -18,7 +18,7 @@ import CoreGraphics
 import ImageIO
 import UIKit
 
-enum RigCalibrationSolver {
+enum RigModel {
 
     // MARK: - Solve bounds
 
@@ -43,7 +43,6 @@ enum RigCalibrationSolver {
         let rodDirection: SIMD3<Float>
         let alongHalf: Float
         let acrossHalf: Float
-        let pitchHalfDeg: Float
 
         /// Distance outside the box, 0 when inside — along and across the rod separately.
         func excursion(_ offset: SIMD3<Float>) -> (along: Float, across: Float) {
@@ -68,23 +67,21 @@ enum RigCalibrationSolver {
                 rodDirection: axis,
                 alongHalf: AppConstants.calibrationMeasuredRodHalfM,
                 acrossHalf: direction == nil ? AppConstants.calibrationBoundAcrossRodM
-                                             : AppConstants.calibrationMeasuredAcrossRodM,
-                pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
+                                             : AppConstants.calibrationMeasuredAcrossRodM)
         }
 
         static let mechanical = SolveBounds(
             anchorOffset: RigProfile.mechanicalPrior.offsetPhone,
             rodDirection: SIMD3<Float>(-1, 0, 0),
             alongHalf: AppConstants.calibrationBoundRodM,
-            acrossHalf: AppConstants.calibrationBoundAcrossRodM,
-            pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
+            acrossHalf: AppConstants.calibrationBoundAcrossRodM)
 
         static func refinement(around profile: RigProfile) -> SolveBounds {
             let length = simd_length(profile.offsetPhone)
             return SolveBounds(
                 anchorOffset: profile.offsetPhone,
                 rodDirection: length > 1e-3 ? profile.offsetPhone / length : SIMD3<Float>(-1, 0, 0),
-                alongHalf: 0.15, acrossHalf: 0.15, pitchHalfDeg: 6)
+                alongHalf: 0.15, acrossHalf: 0.15)
         }
     }
 
@@ -101,7 +98,7 @@ enum RigCalibrationSolver {
     static func composeRigTransform(
         phoneToWorld: simd_float4x4,
         offsetPhone: SIMD3<Float>,
-        yaw: Float, pitchResidual: Float
+        yaw: Float
     ) -> simd_float4x4 {
         // Phone position in world
         let phonePos = SIMD3<Float>(phoneToWorld.columns.3.x,
@@ -134,10 +131,6 @@ enum RigCalibrationSolver {
 
         // Apply pitch residual around the camera's right axis
         let camRight = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), -fwd))
-        if pitchResidual != 0 {
-            let pitchRot = simd_float3x3(simd_quatf(angle: pitchResidual, axis: camRight))
-            fwd = pitchRot * fwd
-        }
 
         let camUp = simd_normalize(simd_cross(-fwd, camRight))
         let back = -fwd
@@ -191,14 +184,12 @@ struct RigProfile: Codable, Equatable {
     /// five stills of the 2026-08-18 19:19 scan.
     ///
     /// Consequences worth keeping: the operator's tape measures ‖offsetPhone‖ DIRECTLY
-    /// (no cosine, no per-scan tilt correction), and `pitchResidual` /
+    /// (no cosine, no per-scan tilt correction), and the retired pitch/elevation nuisance terms /
     /// `elevation_offset_deg` no longer have a systematic error to soak up, so their
     /// collapsing toward zero is a falsifiable check on this model rather than a hope.
     let offsetPhone: SIMD3<Float>
     /// Yaw offset — rotation around the vertical axis (radians).
     let yaw: Float
-    /// Pitch residual — small correction for imperfect zenith compensation (radians).
-    let pitchResidual: Float
     /// Calibration residual — RMS reprojection error in equirect pixels (512-wide).
     /// NOTE: renamed from residualCm (which was actually mean-SQUARED px, finding #3).
     /// The Codable key change deliberately invalidates previously-persisted profiles —
@@ -219,7 +210,6 @@ struct RigProfile: Codable, Equatable {
         RigProfile(
             offsetPhone: SIMD3<Float>(-AppConstants.rigRodHeightMeters, 0, 0),
             yaw: AppConstants.rigYawOffsetDegrees * .pi / 180,
-            pitchResidual: 0,
             residualPx: -1,  // sentinel: not calibrated
             timestamp: .distantPast,
             cameraModel: nil,
@@ -231,7 +221,7 @@ struct RigProfile: Codable, Equatable {
 
     /// Same geometry with a substituted (per-session) yaw.
     func replacingYaw(_ yaw: Float) -> RigProfile {
-        RigProfile(offsetPhone: offsetPhone, yaw: yaw, pitchResidual: pitchResidual,
+        RigProfile(offsetPhone: offsetPhone, yaw: yaw,
                    residualPx: residualPx, timestamp: timestamp,
                    cameraModel: cameraModel, cameraSerialNumber: cameraSerialNumber)
     }
@@ -240,7 +230,6 @@ struct RigProfile: Codable, Equatable {
         RigProfile(
             offsetPhone: offsetPhone,
             yaw: yaw,
-            pitchResidual: pitchResidual,
             residualPx: residualPx,
             timestamp: timestamp,
             cameraModel: cameraModel ?? self.cameraModel,

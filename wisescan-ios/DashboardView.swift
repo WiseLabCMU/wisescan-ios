@@ -2,9 +2,12 @@ import SwiftUI
 
 struct DashboardView: View {
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.developerMode) private var developerMode = false
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
+    /// The control plane didn't answer and there is an Upload URL: the card shows that instead.
+    @State private var controlPlaneDown = false
     @State private var wearableManager = MetaWearableManager.shared
     @State private var thetaManager = ThetaCameraManager.shared
     @State private var bleManager = ThetaBLEManager.shared
@@ -34,7 +37,7 @@ struct DashboardView: View {
                                     .frame(width: 40)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Upload Server")
+                                    Text(usesControlPlane && !controlPlaneDown ? "Control Plane" : "Upload Server")
                                         .font(.headline)
                                         .foregroundColor(.white)
                                     Text(serverStatusLabel)
@@ -55,16 +58,16 @@ struct DashboardView: View {
                                     }
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 8)
-                                    .background(uploadURL.isEmpty ? Color.gray.opacity(0.2) : Color.cyan.opacity(0.2))
-                                    .foregroundColor(uploadURL.isEmpty ? .gray : .cyan)
+                                    .background(!serverConfigured ? Color.gray.opacity(0.2) : Color.cyan.opacity(0.2))
+                                    .foregroundColor(!serverConfigured ? .gray : .cyan)
                                     .cornerRadius(8)
                                 }
-                                .disabled(serverStatus == .checking || uploadURL.isEmpty)
+                                .disabled(serverStatus == .checking || !serverConfigured)
                             }
 
-                            Text(uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL)
+                            Text(serverCaption)
                                 .font(.caption2)
-                                .foregroundColor(uploadURL.isEmpty ? .orange : .white.opacity(0.7))
+                                .foregroundColor(!serverConfigured ? .orange : .white.opacity(0.7))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -76,6 +79,9 @@ struct DashboardView: View {
                         )
                         .cornerRadius(16)
                         .padding(.horizontal)
+
+                        // Focus scans the lab asked this device for (a worker's queue).
+                        ControlPlaneTodoCard()
 
                         // Local Servers (mDNS) — not yet implemented
                         /*
@@ -242,7 +248,7 @@ struct DashboardView: View {
             }
             .preferredColorScheme(.dark)
             .onAppear {
-                if !uploadURL.isEmpty { checkServer() }
+                if serverConfigured { checkServer() }
                 // Refresh wearable state when returning to this tab
                 wearableManager.refreshDevices()
             }
@@ -286,7 +292,38 @@ struct DashboardView: View {
         }
     }
 
+    /// With a control plane set it is the server that matters: it hands out upload destinations.
+    /// While it is down, exports go to the Upload URL (ExportUploadTarget), so that is checked.
+    private var usesControlPlane: Bool { ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil }
+
+    private var serverConfigured: Bool { usesControlPlane || !uploadURL.isEmpty }
+
+    private var serverCaption: String {
+        if usesControlPlane && controlPlaneDown { return "Control plane unreachable — uploading to \(uploadURL)" }
+        if usesControlPlane { return controlPlaneHost }
+        return uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL
+    }
+
     private func checkServer() {
+        if usesControlPlane {
+            serverStatus = .checking
+            Task {
+                let reachable = await ControlPlaneSync.shared.isReachable()
+                controlPlaneDown = !reachable && !uploadURL.isEmpty
+                if controlPlaneDown {
+                    checkUploadURL()
+                } else {
+                    serverStatus = reachable ? .available : .unavailable
+                }
+            }
+            return
+        }
+        controlPlaneDown = false
+        checkUploadURL()
+    }
+
+    /// Any HTTP answer from the Upload URL counts as reachable.
+    private func checkUploadURL() {
         guard !uploadURL.isEmpty, let url = URL(string: uploadURL) else {
             serverStatus = .unknown
             return
@@ -550,6 +587,10 @@ struct WearableCard: View {
 /// connected. Camera management (add another / edit Wi-Fi / forget) is always
 /// reachable via the Manage menu. See ThetaCameraManager.
 struct ThetaCameraCard: View {
+    /// The camera bench (still resolution, Test Shutter, its timings and Download & Preview) is
+    /// Developer Mode only: the app already forces maximum resolution on every connect, and a test
+    /// shot is removed from the camera only by Download, so the three go together.
+    @AppStorage(AppConstants.Key.developerMode) private var developerMode = AppConstants.developerMode
     @Bindable var manager: ThetaCameraManager
     @State private var showNetworkSheet = false
     @State private var sheetSSID = ""
@@ -901,6 +942,17 @@ struct ThetaCameraCard: View {
                                 .foregroundColor(.white.opacity(0.7))
                         }
                     }
+                    // #57 P2: the password is derivable from the SSID beacon itself, so the
+                    // exposure is continuous while the camera is on — a persistent quiet badge,
+                    // not a one-time nag. The remedy is in the connect log line.
+                    if manager.activeCameraUsesFactoryPassword {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.open.fill")
+                            Text("factory Wi-Fi password")
+                        }
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                    }
                 }
                 Spacer()
             }
@@ -983,8 +1035,9 @@ struct ThetaCameraCard: View {
                     .foregroundColor(.orange)
             }
 
-            // Still resolution — read from the camera, changeable via a preset menu.
-            if manager.isConnected {
+            // Still resolution — read from the camera, changeable via a preset menu. The app forces the
+            // maximum on every connect (forceMaxStillResolution), so this is a bench override.
+            if developerMode, manager.isConnected {
                 HStack {
                     Text("Still resolution")
                         .font(.caption)
@@ -1047,8 +1100,9 @@ struct ThetaCameraCard: View {
                 .disabled(manager.state == .connecting)
 
                 // Rendered only once the Wi-Fi connection completes (field spec) —
-                // a permanently disabled gray button earned its keep never.
-                if manager.isConnected {
+                // a permanently disabled gray button earned its keep never. Developer Mode only,
+                // with the Download that removes its shot from the camera.
+                if developerMode, manager.isConnected {
                     Button(action: { manager.takePicture() }, label: {
                         HStack {
                             if manager.isCapturing {
@@ -1069,8 +1123,9 @@ struct ThetaCameraCard: View {
                 }
             }
 
-            // Last trigger result — the P2 spike's headline number (round-trip latency).
-            if let capture = manager.lastCapture {
+            // Last trigger result — the P2 spike's headline number (round-trip latency). Developer
+            // Mode only; an error still shows for everyone.
+            if developerMode, let capture = manager.lastCapture {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
                     Text("Captured in \(capture.roundTripMs) ms")
