@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.10.0](https://github.com/WiseLabCMU/scan4d-ios/compare/v0.9.0...v0.10.0) (2026-11-12)
+
+
+### Features
+
+* **export:** Scan4D is the one capture export ([a595338](https://github.com/WiseLabCMU/scan4d-ios/commit/a595338573ddebcca852b6ab0288b2294e05f31c))
+* **privacy:** turn the Privacy Filter back on after a time limit- [#125](https://github.com/WiseLabCMU/scan4d-ios/issues/125)⁠ ([9663fa8](https://github.com/WiseLabCMU/scan4d-ios/commit/9663fa8eeb119f95b535b50ad086aca9e62e9a66))
+* **server:** a Server tab for the lab server ([b4bc820](https://github.com/WiseLabCMU/scan4d-ios/commit/b4bc820d292369a5f9c377fd2a8828cc9294df86))
+* **server:** name an unnamed device after its model ([7cef97d](https://github.com/WiseLabCMU/scan4d-ios/commit/7cef97d3383098a4992c07da28ffed487189f831))
+* **settings:** restore default developer options ([d133028](https://github.com/WiseLabCMU/scan4d-ios/commit/d1330282e88111330c37365cf19008d2a554b35f))
+* **share:** ask for the format at each Share ([d009934](https://github.com/WiseLabCMU/scan4d-ios/commit/d00993465d24e4a69581e4c7c853a5b4bb158243))
+* sync entire scan4d bundle ([83a8b08](https://github.com/WiseLabCMU/scan4d-ios/commit/83a8b0886fa760851174c64c22ce2bd72a5c3a3e))
+* **sync:** Always Send for scans captured with the Privacy Filter off ([a8bbc88](https://github.com/WiseLabCMU/scan4d-ios/commit/a8bbc88f5965370fe3ebf928d164a17b45dab3b6))
+* **sync:** send each scan to the lab server as one bundle ([a13a681](https://github.com/WiseLabCMU/scan4d-ios/commit/a13a681fa423b6a37b73a5471b2e83c1cb2e8a23))
+* **sync:** start every build with the server setting empty ([b1b1ec9](https://github.com/WiseLabCMU/scan4d-ios/commit/b1b1ec95a6b4a416a831308c252dde4db21b169f))
+* **ui:** fewer controls on everyday screens ([#127](https://github.com/WiseLabCMU/scan4d-ios/issues/127)) ([d858f98](https://github.com/WiseLabCMU/scan4d-ios/commit/d858f981365f37b5c2f15a680fd3a4a012c1017e))
+
+
+### Bug Fixes
+
+* **capture:** re-arm the AR readiness latch from the published flag ([28b1dd3](https://github.com/WiseLabCMU/scan4d-ios/commit/28b1dd35227ab0b14949eefc9f2d3dc4cbab6729))
+* **capture:** tracking loss keeps what was captured without blocking rescans ([#86](https://github.com/WiseLabCMU/scan4d-ios/issues/86)) ([27e7ae2](https://github.com/WiseLabCMU/scan4d-ios/commit/27e7ae296b9c6d760dcbe77cca202e6c40d28a35))
+* **sync:** address the bundle sync review ([59aada5](https://github.com/WiseLabCMU/scan4d-ios/commit/59aada51588b13a975ece37084dc10f17d453de4))
+* **theta:** report camera deletes as the camera answers them ([d25a12b](https://github.com/WiseLabCMU/scan4d-ios/commit/d25a12bf5d0c4a6ee0372c9e1b6f2ac43512e934))
+* **wearables:** accept Meta AI registration requests and report an outdated SDK ([9fe648d](https://github.com/WiseLabCMU/scan4d-ios/commit/9fe648d5247bb571199ff22346d0f801df04b989))
+
+
+### Performance Improvements
+
+* **wearables:** drop wearable frames instead of queueing them ([a4298dd](https://github.com/WiseLabCMU/scan4d-ios/commit/a4298ddb15c13ea154122dc546ffe7cd5d9a64ab))
+
 ## [0.9.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.8.0...v0.9.0) (2026-11-05)
 
 
