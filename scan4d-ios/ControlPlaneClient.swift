@@ -127,7 +127,7 @@ nonisolated struct ControlPlaneClient: Sendable {
     }
 
     /// The server from what the user typed: "192.168.1.40:8000", "scan4d.local:8000",
-    /// "https://wiselambda4.lan.cmu.edu/scan4d". No scheme means http; nil when unusable.
+    /// "https://example.com/scan4d". No scheme means http; nil when unusable.
     static func baseURL(fromHost host: String) -> URL? {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
