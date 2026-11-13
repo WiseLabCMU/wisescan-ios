@@ -380,7 +380,7 @@ final class ControlPlaneTests: XCTestCase {
 
         func reported(newSince: Date?, local: Set<UUID> = []) -> Set<UUID> {
             Set(ControlPlaneSync.spacesToReport(locations, synced: [sent.location.id], local: local,
-                                                newSince: newSince).map(.id))
+                                                newSince: newSince).map(\.id))
         }
         // Sync new spaces on (new since joining), off, and before the first sync (nothing new yet).
         XCTAssertEqual(reported(newSince: joined), [sent.location.id, new.location.id])
