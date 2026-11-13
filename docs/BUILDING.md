@@ -74,5 +74,26 @@ swiftlint lint --quiet scan4d-ios/
   ```
 - Files with pre-existing violations suppressed via file-level `// swiftlint:disable` comments: `FrameCaptureSession.swift`, `ARCoverageView.swift`, `CaptureView.swift`
 
+## Meta Wearables setup
+
+Testing with Meta Ray-Ban glasses (proxy mode, REQ-017) needs a few manual steps. For problems after setup, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#meta-ray-ban-wearables).
+
+1. **Swift package**
+   The project already references the `meta-wearables-dat-ios` package (`https://github.com/facebook/meta-wearables-dat-ios`), and Xcode resolves it when the project opens. Change the package only in Xcode (`File > Packages`): a text edit to `project.pbxproj` for it can corrupt the file.
+
+2. **Meta credentials (optional)**
+   Register your `MetaAppID`, `ClientToken` and `TeamID` in the Meta Wearables Developer Center. Keep the real values on your machine only: the privacy guard refuses a staged plist that carries them (see CONTRIBUTING, Credentials). Put them into `Custom-Info.plist` locally without staging the file, or leave them blank to work in the Meta app's developer mode.
+
+3. **Developer mode in the Meta AI app**
+   Without registered production credentials:
+   - Open the Meta AI companion app (formerly Meta View) on the test iPhone.
+   - Go to Settings > Developer Mode and turn it on.
+   - When you tap Connect in Scan4D, it deep-links to the Meta AI app; tap Allow on the developer prompt to authorize the local stream.
+
+4. **Checks**
+   - **Compilation:** the project compiles cleanly with the package linked.
+   - **Pairing:** `DashboardView` lists the glasses once the Meta AI app reports them available.
+   - **Hardware trigger:** pressing the capture button on the glasses starts a frame drop into a proxy package (`scan4d_metadata.json`), and the glasses' LED lights.
+
 ## Release & TestFlight
 See [RELEASE.md](RELEASE.md) — release-please versioning and Fastlane TestFlight distribution.

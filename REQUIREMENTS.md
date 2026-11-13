@@ -2,7 +2,7 @@
 
 > **Purpose:** This is the single source of truth for feature requirements, architecture, and implementation status of the Scan4D application. It is designed to be consumed by both humans and AI coding assistants to maintain context across development sessions.
 >
-> **Maintainer note:** When adding a feature, update the relevant section below _and_ the corresponding entry in [README.md](README.md). When modifying architecture, update the diagrams and source links.
+> **Maintainer note:** When adding a feature, update the relevant section below _and_ the corresponding bullet in [README.md](README.md) (at most two sentences there; the detail belongs here). A new source file gets a row in the [Source File Index](#source-file-index). When modifying architecture, update the diagrams and source links.
 
 ---
 
@@ -132,12 +132,31 @@ graph TD
 
 ### Source File Index
 
+Every source file in [scan4d-ios/](scan4d-ios/), by area. A new file gets a row here in the same change.
+
+#### App shell, settings, guides
+
 | File | Role | Key Types / Functions |
 |:-----|:-----|:----------------------|
 | [AppDelegate.swift](scan4d-ios/AppDelegate.swift) | App lifecycle, orientation locking | `AppDelegate`, `orientationLocked` |
 | [AppConstants.swift](scan4d-ios/AppConstants.swift) | Centralized constants, defaults, pipeline tuning | `AppConstants`, `CaptureMode`, `Key`, `UI` |
 | [ContentView.swift](scan4d-ios/ContentView.swift) | Root TabView (Dashboard, Capture, Scans), LiDAR check | `ContentView`, `hasLiDAR` |
-| [DashboardView.swift](scan4d-ios/DashboardView.swift) | Server status, wearable pairing | `DashboardView` |
+| [DashboardView.swift](scan4d-ios/DashboardView.swift) | Scan4D server status, wearable glasses connect, 360° camera card, lab to-do list | `DashboardView` |
+| [SettingsView.swift](scan4d-ios/SettingsView.swift) | User Guide link, AR/VR capture mode, data management, Developer Mode (server settings are in the Server tab) | `SettingsView`, `developerMode` |
+| [ButtonStyles.swift](scan4d-ios/ButtonStyles.swift) | Shared button styles (full-area-tappable filled buttons) | `FilledActionButtonStyle` |
+| [AdaptiveActionLabel.swift](scan4d-ios/AdaptiveActionLabel.swift) | Action-button label: icon on iPad, text-only on iPhone | `AdaptiveActionLabel` |
+| [PermissionsOverlay.swift](scan4d-ios/PermissionsOverlay.swift) | Camera/AR permission request UI | `PermissionsOverlay` |
+| [UserGuideView.swift](scan4d-ios/UserGuideView.swift) | In-app workflow guide | `UserGuideView` |
+| [UserGuideStatusIcons.swift](scan4d-ios/UserGuideStatusIcons.swift) | User Guide troubleshooting for the sync and warning badges | `StatusIconsGuideSections` |
+| [DeviceConnectionGuides.swift](scan4d-ios/DeviceConnectionGuides.swift) | Device setup walkthroughs (Meta Ray-Ban, Ricoh Theta) | `MetaConnectionGuideView`, `ThetaConnectionGuideView` |
+| [LocationManager.swift](scan4d-ios/LocationManager.swift) | GPS/heading updates for scan metadata | `LocationManager` |
+| [DemoDataSeeder.swift](scan4d-ios/DemoDataSeeder.swift) | Orphan scan discovery + SwiftData seeding | `DemoDataSeeder`, `seedIfNeeded()` |
+| [TestDataGenerator.swift](scan4d-ios/TestDataGenerator.swift) | Mock camera intrinsics for testing | `TestDataGenerator` |
+
+#### Room-scan capture
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
 | [CaptureView.swift](scan4d-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming, capacity HUD | `CaptureView`, `startRecording()`, `stopRecording()`, `performStopRecording()`, `startBackgroundProcessing()` |
 | [CaptureView+Recording.swift](scan4d-ios/CaptureView+Recording.swift) | Recording start/stop, save flow, world-map + VIO save safety | `savePendingScan()`, `writeStitchingLinkIfPending()` |
 | [CaptureView+Extend.swift](scan4d-ios/CaptureView+Extend.swift) | Pin & Extend (mid-session boundary link) | extend/auto-save/reset flow |
@@ -145,90 +164,150 @@ graph TD
 | [AlignmentOverlayView.swift](scan4d-ios/AlignmentOverlayView.swift) | Cross-session alignment overlay (distance + tracking state) | `AlignmentOverlayView` |
 | [ARCoverageView.swift](scan4d-ios/ARCoverageView.swift) | ARKit session, mesh wireframe (AR), point cloud (VR), mesh export | `ARCoverageView`, `Coordinator`, `exportMeshOBJ()`, `makeFreshConfiguration()`, `PointCloudManager` |
 | [PointCloudManager.swift](scan4d-ios/PointCloudManager.swift) | VR mode: live depth point cloud rendering via Metal | `PointCloudManager`, `setup()`, `updatePointCloud()` |
+| [VoxelGrid.swift](scan4d-ios/VoxelGrid.swift) | Metal voxel grid for VR accumulated point cloud | `VoxelGrid` |
+| [VoxelGrid+Extraction.swift](scan4d-ios/VoxelGrid+Extraction.swift) | Mesh-extraction packing for the VR voxel grid | `VoxelGrid` extension |
 | [FaceBlurOverlay.swift](scan4d-ios/FaceBlurOverlay.swift) | Live red-eye privacy indicator (from ARKit stencil) + pixelation utility for exports | `PrivacyEyeOverlay`, `PrivacyEyeTracker`, `PrivacyBlurUtil.pixelatePersonsWithMask()`, `pixelatePersonsAndGetFaceCenters()` |
+| [CaptureView+Privacy.swift](scan4d-ios/CaptureView+Privacy.swift) | Privacy Filter time-limit checks on the capture screen (REQ-004) | `enforcePrivacyFilterRules()` |
+| [PrivacyFilterTimer.swift](scan4d-ios/PrivacyFilterTimer.swift) | The Privacy Filter's time limit (REQ-004) | `PrivacyFilterTimer` |
 | [FrameCaptureSession.swift](scan4d-ios/FrameCaptureSession.swift) | Room-scan capture: automatic 12MP stills (REQ-036), depth, poses, stillness detection, the rig's tapped still | `FrameCaptureSession`, `start()`, `stop()`, `considerAutoStill()`, `requestStillCapture()`, `writeTransformsJSON()`, `writePolycamCameras()` |
 | [CaptureExposurePolicy.swift](scan4d-ios/CaptureExposurePolicy.swift) | Short-exposure cap on ARKit's camera for both capture modes (1/500 to 1/120 s by the light, re-applied after a session re-run) | `CaptureExposurePolicy` |
 | [DelegateWorkMeter.swift](scan4d-ios/DelegateWorkMeter.swift) | Per-frame AR delegate timing during a room scan | `DelegateWorkMeter` |
-| [ARStillCaptureSession.swift](scan4d-ios/ARStillCaptureSession.swift) | Focus-scan still engine: gates, region gate, coverage counts, logs, manifest (REQ-035) | `ARStillCaptureSession`, `offer()`, `LiveStats`, `WorkTiming` |
-| [ARStillCaptureGates.swift](scan4d-ios/ARStillCaptureGates.swift) | Pure gate math shared by both modes | `imageMotionSmear`, `GyroHistory`, `regionView`, `coverageBin`, `spacingDecision` |
-| [ARStillCaptureController.swift](scan4d-ios/ARStillCaptureController.swift) | Focus-scan controller: start/stop, stats polling | `ARStillCaptureController` |
-| [FocusRegion.swift](scan4d-ios/FocusRegion.swift) | Focus region, detail levels, placement in a map's raw frame | `FocusRegion`, `FocusDetailLevel`, `FocusBoxPlacement` |
-| [FocusRegionEditorView.swift](scan4d-ios/FocusRegionEditorView.swift) | Region drawing on a room scan's mesh | `FocusRegionEditorView`, `FocusRegionSceneView` |
-| [FocusCaptureHUD.swift](scan4d-ios/FocusCaptureHUD.swift) | Focus-scan HUD and coverage dial | `FocusCaptureHUD`, `FocusCoverageDial` |
-| [FocusScanStorage.swift](scan4d-ios/FocusScanStorage.swift) | Filing a capture as a focus scan; card thumbnail | `ScanFileManager.saveFocusScan`, `FocusScanThumbnail` |
-| [FocusScanViews.swift](scan4d-ios/FocusScanViews.swift) | Focus-scan photo grid and pager | `FocusScanPhotosView` |
-| [FocusRegionInbox.swift](scan4d-ios/FocusRegionInbox.swift) | Region import by deep link (REQ-037) | `FocusRegionInbox` |
-| [ScanExportManager+Focus.swift](scan4d-ios/ScanExportManager+Focus.swift) | Focus-scan export and its fail-closed person check | `prepareFocusExport`, `FocusStillPrivacy` |
 | [StillnessReticle.swift](scan4d-ios/StillnessReticle.swift) | Capture-quality reticle: ring fills as device settles | `StillnessReticle` |
 | [PhotoCoverageGrid.swift](scan4d-ios/PhotoCoverageGrid.swift) | World-space voxel grid tracking photo coverage (amber overlay source) | `PhotoCoverageGrid`, `stamp()` |
-| [LocationDetailView.swift](scan4d-ios/LocationDetailView.swift) | Per-location scan management, share, sync, preview | `LocationDetailView` |
-| [ScansListView.swift](scan4d-ios/ScansListView.swift) | Scan cards, location groups, rename, share, sync badges, stitch graph entry | `ScansListView`, `ScanCard` |
-| [StitchingMetadata.swift](scan4d-ios/StitchingMetadata.swift) | Boundary-anchor link manifest (`stitching.json`), async I/O | `StitchingLink`, `LinkType`, `StitchingMetadataManager` (`write`/`addLink`/`read`/`hasLinks`) |
-| [StitchLinkModel.swift](scan4d-ios/StitchLinkModel.swift) | Structured logging for the stitch-link subsystem | `stitchLog` |
-| [ThumbnailCache.swift](scan4d-ios/ThumbnailCache.swift) | Downsampled on-disk thumbnail decode + memory cache | `ThumbnailCache` |
-| [StitchGraphModel.swift](scan4d-ios/StitchGraphModel.swift) | Linked-scan graph model (nodes, edges, components) | `StitchGraph`, `StitchGraphNode`, `StitchGraphEdge`, `StitchGraph.build(from:)` |
-| [StitchGraphView.swift](scan4d-ios/StitchGraphView.swift) | Node-graph visualization of linked scans | `StitchGraphView` |
-| [CombinedMeshView.swift](scan4d-ios/CombinedMeshView.swift) | Combined SceneKit view of all linked scans (optional per-map tint) | `CombinedMeshScreen`, `CombinedMeshView` |
-| [MeshPreviewView.swift](scan4d-ios/MeshPreviewView.swift) | SceneKit 3D preview with vertex colors | `MeshPreviewView` |
-| [MeshPreviewView+KeyframeFrustums.swift](scan4d-ios/MeshPreviewView+KeyframeFrustums.swift) | Camera frustum markers (stills/motion) in the mesh preview | `KeyframeMarkerMode`, frustum node builders |
-| [ScanStore.swift](scan4d-ios/ScanStore.swift) | Data models, location hierarchy, capacity scoring | `ScanStore`, `ScanLocation`, `CapturedScan`, `ScanStats`, `capacityScore` |
-| [ScanExportManager.swift](scan4d-ios/ScanExportManager.swift) | Export packaging for all formats | `ScanExportManager`, `prepareExport()` |
-| [ScanPostprocessor.swift](scan4d-ios/ScanPostprocessor.swift) | Process step: registration bake, ghost proxy, colorize, gates, bad-scan check | `ScanPostprocessor`, `pendingSteps()`, `needsPostprocess()`, `scheduleBadScanCheck()` |
-| [PlaneRegistration.swift](scan4d-ios/PlaneRegistration.swift) | Gravity-locked 4-DOF plane-registration solver (canonical frame) | `PlaneRegistration`, observability gate, trim rescue |
-| [SaveRegistration.swift](scan4d-ios/SaveRegistration.swift) | Transactional registration bake + `registration.json` sidecar | `SaveRegistration`, `writeSidecar()`, `retransformRoomPlanJSON()` |
-| [RoomPlanExporter.swift](scan4d-ios/RoomPlanExporter.swift) | `roomplan.json` / `roomplan_raw.json` sidecar writers | `RoomPlanExporter` |
-| [DerivedSurfaces.swift](scan4d-ios/DerivedSurfaces.swift) | `derived_surfaces.json` sidecar: levels/ramps recovered from the classified mesh | `DerivedSurfacesData`, `Surface`, `schemaVersion`, `load(scanDirectory:)`, `matrix`, `centerY` |
-| [MeshConverter.swift](scan4d-ios/MeshConverter.swift) | OBJ→PLY and OBJ→USDZ mesh conversion | `MeshConverter.objToPLY()`, `MeshConverter.objToUSDZ()` |
-| [MeshParser.swift](scan4d-ios/MeshParser.swift) | Wavefront OBJ parser | `MeshParser`, `OBJData`, `parseOBJ()` |
-| [VertexColorAccumulator.swift](scan4d-ios/VertexColorAccumulator.swift) | Normals-based default coloring, on-demand vertex coloring, ARWorldMap export | `VertexColorAccumulator`, `generateNormalsColors()`, `colorizeFromSavedFrames()`, `exportWorldMap()` |
-| [VoxelGrid.swift](scan4d-ios/VoxelGrid.swift) | Metal voxel grid for VR accumulated point cloud | `VoxelGrid` |
-| [VoxelGrid+Extraction.swift](scan4d-ios/VoxelGrid+Extraction.swift) | Mesh-extraction packing for the VR voxel grid | `VoxelGrid` extension |
-| [MetaWearableManager.swift](scan4d-ios/MetaWearableManager.swift) | Meta Wearables DAT SDK lifecycle, streaming, proxy frames | `MetaWearableManager` |
-| [LocationManager.swift](scan4d-ios/LocationManager.swift) | GPS/heading updates for scan metadata | `LocationManager` |
-| [PermissionsOverlay.swift](scan4d-ios/PermissionsOverlay.swift) | Camera/AR permission request UI | `PermissionsOverlay` |
-| [SettingsView.swift](scan4d-ios/SettingsView.swift) | Control plane, RAW settings, capture mode, Developer Mode | `SettingsView`, `developerMode` |
-| [ButtonStyles.swift](scan4d-ios/ButtonStyles.swift) | Shared button styles (full-area-tappable filled buttons) | `FilledActionButtonStyle` |
-| [ScanCoach.swift](scan4d-ios/ScanCoach.swift) | Rules engine: 4-tier priority coaching tips (~1Hz eval) | `ScanCoach`, `CoachTip`, `TipPriority`, `evaluate()` |
-| [CoachBarView.swift](scan4d-ios/CoachBarView.swift) | Coach bar UI: color-coded tip banner with swipe-to-dismiss | `CoachBarView` |
-| [SpaceAnalyzer.swift](scan4d-ios/SpaceAnalyzer.swift) | Pre-scan analysis engine: 360° yaw tracker, report builder | `SpaceAnalyzer`, `SpaceAnalysisResult` |
-| [ScanAnalysisReportView.swift](scan4d-ios/ScanAnalysisReportView.swift) | Space analysis report modal: per-check pass/warn/skip cards | `ScanAnalysisReportView` |
-| [TrackingStability.swift](scan4d-ios/TrackingStability.swift) | Mid-scan tracking snap/stability detector | `TrackingStabilityMonitor`, `SnapTracker` |
-| [PerfDiag.swift](scan4d-ios/PerfDiag.swift) | Perf diagnostics: main-thread watchdog, frame gaps, I/O backlog | `PerfDiag`, `MainThreadWatchdog` |
-| [LocalizationDiag.swift](scan4d-ios/LocalizationDiag.swift) | Log-only relocalization diagnostics (dev-gated) | `LocalizationDiag` |
-| [UserGuideView.swift](scan4d-ios/UserGuideView.swift) | In-app workflow guide | `UserGuideView` |
-| [DeviceConnectionGuides.swift](scan4d-ios/DeviceConnectionGuides.swift) | Device setup walkthroughs (Meta Ray-Ban) | `MetaConnectionGuideView` |
-| [DemoDataSeeder.swift](scan4d-ios/DemoDataSeeder.swift) | Orphan scan discovery + SwiftData seeding | `DemoDataSeeder`, `seedIfNeeded()` |
-| [TestDataGenerator.swift](scan4d-ios/TestDataGenerator.swift) | Mock camera intrinsics for testing | `TestDataGenerator` |
-| [Shaders/PointCloud.metal](scan4d-ios/Shaders/PointCloud.metal) | VR point cloud vertex/fragment shaders | Metal GPU pipeline |
-| [Shaders/Bloom.metal](scan4d-ios/Shaders/Bloom.metal) | Bloom post-processing shader | Metal GPU pipeline |
-| [Shaders/Wireframe.metal](scan4d-ios/Shaders/Wireframe.metal) | AR wireframe rendering shaders | Metal GPU pipeline |
-| [AdaptiveActionLabel.swift](scan4d-ios/AdaptiveActionLabel.swift) | Action-button label: icon on iPad, text-only on iPhone | `AdaptiveActionLabel` |
-| [DepthPNG.swift](scan4d-ios/DepthPNG.swift) | Single decoder for the pipeline's 16-bit depth PNGs | `DepthPNG` |
-| [DiagnosticsLogExport.swift](scan4d-ios/DiagnosticsLogExport.swift) | On-device export of the app's own unified-log entries (REQ-013) | `DiagnosticsLogExport` |
-| [EquirectPrivacyBlur.swift](scan4d-ios/EquirectPrivacyBlur.swift) | Person-privacy blur for exported equirects, fail-closed (REQ-004, REQ-033) | `EquirectPrivacyBlur` |
-| [EquirectPrivacyBlur+Projection.swift](scan4d-ios/EquirectPrivacyBlur+Projection.swift) | Equirect / cube-face geometry for the privacy pass | face selection, direction lookup |
-| [EquirectPrivacyBlur+Vision.swift](scan4d-ios/EquirectPrivacyBlur+Vision.swift) | Per-face person segmentation for the privacy pass | Vision requests per face |
-| [EquirectYawAnchor.swift](scan4d-ios/EquirectYawAnchor.swift) | Yaw basin for the rig solve from the phone's keyframes (solver v8) | `EquirectYawAnchor` |
-| [FaceDepthRender.swift](scan4d-ios/FaceDepthRender.swift) | Depth for a synthetic cube face, rasterized from the scan's own mesh | `FaceDepthRender` |
-| [FeaturePointCloudFile.swift](scan4d-ios/FeaturePointCloudFile.swift) | `arkit_features.bin` reader/writer (REQ-040) | `FeaturePointCloudFile` |
-| [MeshPreviewView+SemanticLabels.swift](scan4d-ios/MeshPreviewView+SemanticLabels.swift) | Semantic label detail, legend filter, tap-to-identify (REQ-028) | label legend, hit test |
-| [MeshPreviewView+Timeline.swift](scan4d-ios/MeshPreviewView+Timeline.swift) | Time scrubber across a location's room generations, A/B (REQ-005) | timeline state |
-| [ScanTimelineBar.swift](scan4d-ios/ScanTimelineBar.swift) | The preview's bottom-docked time scrubber (REQ-005) | `ScanTimelineBar` |
-| [NerfstudioExport.swift](scan4d-ios/NerfstudioExport.swift) | `transforms.json` bundle for Nerfstudio and LichtFeld Studio (REQ-006) | `NerfstudioExport` |
-| [OperatorRigMask.swift](scan4d-ios/OperatorRigMask.swift) | Per-still mask of the operator, grip and rod (REQ-033) | `OperatorRigMask` |
-| [RigModel.swift](scan4d-ios/RigModel.swift) | Rig geometry model and solve bounds (REQ-033) | `RigModel` |
-| [RigHeightSheet.swift](scan4d-ios/RigHeightSheet.swift) | Rig-height editor, imperial/metric, own keypad (REQ-033) | `RigHeightSheet` |
-| [StillSpacingRings.swift](scan4d-ios/StillSpacingRings.swift) | Floor rings for taken 360° stills with a live spacing verdict (REQ-033) | `StillSpacingRings`, `Spacing` |
 | [SweepCoverageRecorder.swift](scan4d-ios/SweepCoverageRecorder.swift) | Records which parts of the room the LiDAR sweep looked at (REQ-039) | `SweepCoverageRecorder` |
 | [SweepCoverageGrid.swift](scan4d-ios/SweepCoverageGrid.swift) | Per-cell sweep observation counters: free, surface, visits (REQ-039) | `SweepCoverageGrid` |
 | [SweepFrameThrottle.swift](scan4d-ios/SweepFrameThrottle.swift) | Admission gate: which ARKit frames the sweep recorder consumes (REQ-039) | `SweepFrameThrottle` |
 | [SweepCoverageFile.swift](scan4d-ios/SweepCoverageFile.swift) | `sweep_coverage.bin` on-disk format (REQ-039) | `SweepCoverageFile` |
 | [SweepCoverageReadout.swift](scan4d-ios/SweepCoverageReadout.swift) | Developer readout of the live sweep-coverage counters (REQ-013, REQ-039) | `SweepCoverageReadout` |
+| [TrackingStability.swift](scan4d-ios/TrackingStability.swift) | Mid-scan tracking snap/stability detector | `TrackingStabilityMonitor`, `SnapTracker` |
+| [ScanCoach.swift](scan4d-ios/ScanCoach.swift) | Rules engine: 4-tier priority coaching tips (~1Hz eval) | `ScanCoach`, `CoachTip`, `TipPriority`, `evaluate()` |
+| [CoachBarView.swift](scan4d-ios/CoachBarView.swift) | Coach bar UI: color-coded tip banner with swipe-to-dismiss | `CoachBarView` |
+| [SpaceAnalyzer.swift](scan4d-ios/SpaceAnalyzer.swift) | Pre-scan analysis engine: 360° yaw tracker, report builder | `SpaceAnalyzer`, `SpaceAnalysisResult` |
+| [ScanAnalysisReportView.swift](scan4d-ios/ScanAnalysisReportView.swift) | Space analysis report modal: per-check pass/warn/skip cards | `ScanAnalysisReportView` |
+| [CaptureFlash.swift](scan4d-ios/CaptureFlash.swift) | Screen flash for every saved still: full for a tapped still, softer for automatic ones (REQ-036) | `CaptureFlash`, `CaptureFlashHost` |
+| [ScreenAwake.swift](scan4d-ios/ScreenAwake.swift) | Keeps auto-lock off while recording or exporting (REQ-007) | `ScreenAwake`, `hold()`, `release()` |
+
+#### Focus scan (partial scan of one region)
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
+| [ARStillCaptureSession.swift](scan4d-ios/ARStillCaptureSession.swift) | Focus-scan still engine: gates, region gate, coverage counts, logs, manifest (REQ-035) | `ARStillCaptureSession`, `offer()`, `LiveStats`, `WorkTiming` |
+| [ARStillCaptureGates.swift](scan4d-ios/ARStillCaptureGates.swift) | Pure gate math shared by both modes | `imageMotionSmear`, `GyroHistory`, `regionView`, `coverageBin`, `spacingDecision` |
+| [ARStillCaptureController.swift](scan4d-ios/ARStillCaptureController.swift) | Focus-scan controller: start/stop, stats polling | `ARStillCaptureController` |
+| [CaptureView+StillCapture.swift](scan4d-ios/CaptureView+StillCapture.swift) | Focus scan start/stop, filing as a scan, region box placement (REQ-035) | `FocusScanTarget`, `startStillCapture()`, `stopStillCapture()`, `handleFocusFrameLost()` |
+| [FocusRegion.swift](scan4d-ios/FocusRegion.swift) | Focus region, detail levels, placement in a map's raw frame | `FocusRegion`, `FocusDetailLevel`, `FocusBoxPlacement` |
+| [FocusRegionEditorView.swift](scan4d-ios/FocusRegionEditorView.swift) | Region drawing on a room scan's mesh | `FocusRegionEditorView`, `FocusRegionSceneView` |
+| [FocusRegionInbox.swift](scan4d-ios/FocusRegionInbox.swift) | Region import by deep link (REQ-037) | `FocusRegionInbox` |
+| [FocusCaptureHUD.swift](scan4d-ios/FocusCaptureHUD.swift) | Focus-scan HUD and coverage dial | `FocusCaptureHUD`, `FocusCoverageDial` |
+| [FocusScanStorage.swift](scan4d-ios/FocusScanStorage.swift) | Filing a capture as a focus scan; card thumbnail | `ScanFileManager.saveFocusScan`, `FocusScanThumbnail` |
+| [FocusScanViews.swift](scan4d-ios/FocusScanViews.swift) | Focus-scan photo grid and pager | `FocusScanPhotosView` |
+| [ScanExportManager+Focus.swift](scan4d-ios/ScanExportManager+Focus.swift) | Focus-scan export and its fail-closed person check | `prepareFocusExport`, `FocusStillPrivacy` |
+
+#### 360° still source (Ricoh Theta rig)
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
+| [ThetaCameraManager.swift](scan4d-ios/ThetaCameraManager.swift) | 360° camera: connect, roster, shutter, still downloads (REQ-033) | `ThetaCameraManager`, `ThetaEvent` |
+| [ThetaCameraManager+OSC.swift](scan4d-ios/ThetaCameraManager+OSC.swift) | OSC (Open Spherical Camera) Web API v2.1 transport (REQ-033) | `OSCCommandResponse`, `OSCStateResponse` and the other OSC replies |
+| [ThetaCameraManager+ScanCapture.swift](scan4d-ios/ThetaCameraManager+ScanCapture.swift) | Persists live-scan stills: equirect JPEG + pose sidecar (REQ-033) | `EquirectStillMetadata` |
 | [ThetaCameraManager+StillFormat.swift](scan4d-ios/ThetaCameraManager+StillFormat.swift) | Still-resolution menu for the connected camera (REQ-033) | format filtering |
 | [ThetaCameraManager+StillMotion.swift](scan4d-ios/ThetaCameraManager+StillMotion.swift) | Exposure-sway measurement and capture guards (REQ-033) | sway window |
+| [ThetaBLEManager.swift](scan4d-ios/ThetaBLEManager.swift) | Production BLE: pair, wake from sleep, shutter with file-URL push (REQ-033) | `ThetaBLEManager` |
+| [ThetaBLEManager+Link.swift](scan4d-ios/ThetaBLEManager+Link.swift) | Link setup: power-on wait, scan, connect, identity (REQ-033) | `ThetaBLEManager` extension |
+| [ThetaBLEManager+Delegates.swift](scan4d-ios/ThetaBLEManager+Delegates.swift) | CoreBluetooth delegate callbacks (REQ-033) | `ThetaBLEManager` extension |
+| [ThetaBLEProbe.swift](scan4d-ios/ThetaBLEProbe.swift) | Developer Mode GATT bench for exploring BLE devices (REQ-013, REQ-033) | `ThetaBLEProbe` |
 | [ThetaCaptureCue.swift](scan4d-ios/ThetaCaptureCue.swift) | Visual and haptic capture cue from the manager's capture state (REQ-033) | `ThetaCaptureCue` |
 | [ThetaGravity.swift](scan4d-ios/ThetaGravity.swift) | The 360° camera's own gravity vector at capture, read from the still (REQ-033) | `ThetaGravity` |
+| [StillSpacingRings.swift](scan4d-ios/StillSpacingRings.swift) | Floor rings for taken 360° stills with a live spacing verdict (REQ-033) | `StillSpacingRings`, `Spacing` |
+| [RigModel.swift](scan4d-ios/RigModel.swift) | Rig geometry model and solve bounds (REQ-033) | `RigModel` |
+| [RigHeightSheet.swift](scan4d-ios/RigHeightSheet.swift) | Rig-height editor, imperial/metric, own keypad (REQ-033) | `RigHeightSheet` |
+| [OperatorRigMask.swift](scan4d-ios/OperatorRigMask.swift) | Per-still mask of the operator, grip and rod (REQ-033) | `OperatorRigMask` |
+| [EquirectYawAnchor.swift](scan4d-ios/EquirectYawAnchor.swift) | Yaw basin for the rig solve from the phone's keyframes (solver v8) | `EquirectYawAnchor` |
+| [PhotometricRigSolver.swift](scan4d-ios/PhotometricRigSolver.swift) | Photometric rig solver (v15) that ships the poses (REQ-033) | `PhotometricRigSolver`, `solve()` |
+| [EquirectPostCalibration.swift](scan4d-ios/EquirectPostCalibration.swift) | Per-scan 360° rig solve at Process time; bakes `cam_transform` and provenance (REQ-033) | `EquirectPostCalibration` |
+| [EquirectFaceExport.swift](scan4d-ios/EquirectFaceExport.swift) | Cube faces cut from equirects at baked poses, for export and the colorize probe (REQ-033) | `EquirectFaceExport`, `emitFaces()`, `generateFaceFramesForColorize()` |
+| [EquirectGPU.swift](scan4d-ios/EquirectGPU.swift) | Metal equirect sampling and reprojection (REQ-033) | `EquirectGPU`, `extractFace()`, `renderFace()` |
+| [FaceDepthRender.swift](scan4d-ios/FaceDepthRender.swift) | Depth for a synthetic cube face, rasterized from the scan's own mesh | `FaceDepthRender` |
+| [EquirectPrivacyBlur.swift](scan4d-ios/EquirectPrivacyBlur.swift) | Person-privacy blur for exported equirects, fail-closed (REQ-004, REQ-033) | `EquirectPrivacyBlur` |
+| [EquirectPrivacyBlur+Projection.swift](scan4d-ios/EquirectPrivacyBlur+Projection.swift) | Equirect / cube-face geometry for the privacy pass | face selection, direction lookup |
+| [EquirectPrivacyBlur+Vision.swift](scan4d-ios/EquirectPrivacyBlur+Vision.swift) | Per-face person segmentation for the privacy pass | Vision requests per face |
+
+#### Process step and registration
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
+| [ScanPostprocessor.swift](scan4d-ios/ScanPostprocessor.swift) | Process step: 360° downloads and rig calibration, registration bake, ghost proxy, colorize, gates, bad-scan check | `ScanPostprocessor`, `pendingSteps()`, `needsPostprocess()`, `scheduleBadScanCheck()` |
+| [PlaneRegistration.swift](scan4d-ios/PlaneRegistration.swift) | Gravity-locked 4-DOF plane-registration solver (canonical frame) | `PlaneRegistration`, observability gate, trim rescue |
+| [SaveRegistration.swift](scan4d-ios/SaveRegistration.swift) | Transactional registration bake + `registration.json` sidecar | `SaveRegistration`, `writeSidecar()`, `retransformRoomPlanJSON()` |
+| [RoomPlanExporter.swift](scan4d-ios/RoomPlanExporter.swift) | `roomplan.json` / `roomplan_raw.json` sidecar writers | `RoomPlanExporter` |
+| [DerivedSurfaces.swift](scan4d-ios/DerivedSurfaces.swift) | `derived_surfaces.json` sidecar: levels/ramps recovered from the classified mesh | `DerivedSurfacesData`, `Surface`, `schemaVersion`, `load(scanDirectory:)`, `matrix`, `centerY` |
+| [FeaturePointCloudFile.swift](scan4d-ios/FeaturePointCloudFile.swift) | `arkit_features.bin` reader/writer (REQ-040) | `FeaturePointCloudFile` |
+| [DepthPNG.swift](scan4d-ios/DepthPNG.swift) | Single decoder for the pipeline's 16-bit depth PNGs | `DepthPNG` |
+
+#### Scans, preview, linking
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
+| [LocationDetailView.swift](scan4d-ios/LocationDetailView.swift) | Per-location scan management, share, sync, preview | `LocationDetailView` |
+| [ScansListView.swift](scan4d-ios/ScansListView.swift) | Scan cards, location groups, rename, share, sync badges, stitch graph entry | `ScansListView`, `ScanCard` |
+| [ShareFormatMenu.swift](scan4d-ios/ShareFormatMenu.swift) | Share asks for its format: Scan4D, OBJ, PLY or USDZ (REQ-007) | `ShareFormatMenu` |
+| [ScanStore.swift](scan4d-ios/ScanStore.swift) | Data models, location hierarchy, capacity scoring | `ScanStore`, `ScanLocation`, `CapturedScan`, `ScanStats`, `capacityScore` |
+| [ThumbnailCache.swift](scan4d-ios/ThumbnailCache.swift) | Downsampled on-disk thumbnail decode + memory cache | `ThumbnailCache` |
+| [StitchingMetadata.swift](scan4d-ios/StitchingMetadata.swift) | Boundary-anchor link manifest (`stitching.json`), async I/O | `StitchingLink`, `LinkType`, `StitchingMetadataManager` (`write`/`addLink`/`read`/`hasLinks`) |
+| [StitchLinkModel.swift](scan4d-ios/StitchLinkModel.swift) | Structured logging for the stitch-link subsystem | `stitchLog` |
+| [StitchGraphModel.swift](scan4d-ios/StitchGraphModel.swift) | Linked-scan graph model (nodes, edges, components) | `StitchGraph`, `StitchGraphNode`, `StitchGraphEdge`, `StitchGraph.build(from:)` |
+| [StitchGraphView.swift](scan4d-ios/StitchGraphView.swift) | Node-graph visualization of linked scans | `StitchGraphView` |
+| [CombinedMeshView.swift](scan4d-ios/CombinedMeshView.swift) | Combined SceneKit view of all linked scans (optional per-map tint) | `CombinedMeshScreen`, `CombinedMeshView` |
+| [MeshPreviewView.swift](scan4d-ios/MeshPreviewView.swift) | SceneKit 3D preview with vertex colors | `MeshPreviewView` |
+| [MeshPreviewView+KeyframeFrustums.swift](scan4d-ios/MeshPreviewView+KeyframeFrustums.swift) | Camera frustum markers (stills/motion) in the mesh preview | `KeyframeMarkerMode`, frustum node builders |
+| [MeshPreviewView+SemanticLabels.swift](scan4d-ios/MeshPreviewView+SemanticLabels.swift) | Semantic label detail, legend filter, tap-to-identify (REQ-028) | label legend, hit test |
+| [MeshPreviewView+Timeline.swift](scan4d-ios/MeshPreviewView+Timeline.swift) | Time scrubber across a location's room generations, A/B (REQ-005) | timeline state |
+| [ScanTimelineBar.swift](scan4d-ios/ScanTimelineBar.swift) | The preview's bottom-docked time scrubber (REQ-005) | `ScanTimelineBar` |
+
+#### Export
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
+| [ScanExportManager.swift](scan4d-ios/ScanExportManager.swift) | Export packaging for all formats | `ScanExportManager`, `prepareExport()` |
+| [InterruptedExports.swift](scan4d-ios/InterruptedExports.swift) | At launch, fails the exports a closed app left in flight (REQ-007) | `InterruptedExports` |
+| [MeshConverter.swift](scan4d-ios/MeshConverter.swift) | OBJ→PLY and OBJ→USDZ mesh conversion | `MeshConverter.objToPLY()`, `MeshConverter.objToUSDZ()` |
+| [MeshParser.swift](scan4d-ios/MeshParser.swift) | Wavefront OBJ parser | `MeshParser`, `OBJData`, `parseOBJ()` |
+| [VertexColorAccumulator.swift](scan4d-ios/VertexColorAccumulator.swift) | Normals-based default coloring, on-demand vertex coloring, ARWorldMap export | `VertexColorAccumulator`, `generateNormalsColors()`, `colorizeFromSavedFrames()`, `exportWorldMap()` |
 | [VertexColorGPU.swift](scan4d-ios/VertexColorGPU.swift) | Metal compute path for per-frame vertex projection; CPU fallback in lockstep (REQ-005) | `VertexColorGPU` |
+
+#### Control plane (scan4d-server)
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
+| [ControlPlaneSync.swift](scan4d-ios/ControlPlaneSync.swift) | When and how the app syncs with the control plane (REQ-038) | `ControlPlaneSync` |
+| [ControlPlaneClient.swift](scan4d-ios/ControlPlaneClient.swift) | Control plane HTTP client: host parsing, requests, error text (REQ-038) | `ControlPlaneClient`, `sync()`, `upload()`, `bundleRequest()`, `setTaskStatus()` |
+| [ControlPlaneSession.swift](scan4d-ios/ControlPlaneSession.swift) | URLSession for the control plane, its certificate rule, and the stored password (REQ-038) | `ControlPlaneSession`, `TrustDelegate`, `ControlPlaneSecret` |
+| [ControlPlaneManifest.swift](scan4d-ios/ControlPlaneManifest.swift) | Sync manifest snapshot: SwiftData on main, files off main (REQ-038) | `ControlPlaneManifest`, `SettledScans` |
+| [ScanBundle.swift](scan4d-ios/ScanBundle.swift) | Each scan's sync bundle: version, cache, background upload (REQ-038) | `ScanBundle`, `BundleSync`, `ShareExports` |
+| [SyncViews.swift](scan4d-ios/SyncViews.swift) | Sync badge, scan card sync line, pending-bundles checklist (REQ-007, REQ-038) | `SyncBadge`, `SyncLine`, `PendingBundlesSections`, `PendingBundleRow` |
+| [DeviceIdentity.swift](scan4d-ios/DeviceIdentity.swift) | This phone's identity for the control plane (REQ-038) | `DeviceIdentity`, `defaultLabel` |
+| [ServerView.swift](scan4d-ios/ServerView.swift) | The Server tab: status, Sync now, pending bundles, connection (REQ-038) | `ServerView`, `ServerStatusSection` |
+| [ControlPlaneSettingsSection.swift](scan4d-ios/ControlPlaneSettingsSection.swift) | The Server tab's connection: host, password, device name, certificates, Auto sync (REQ-038) | `ControlPlaneSettingsSection` |
+| [ControlPlanePasswordPrompt.swift](scan4d-ios/ControlPlanePasswordPrompt.swift) | Password prompt before a tapped Sync, and the deferred action replay (REQ-038) | `ControlPlanePasswordPrompt`, `ControlPlanePasswordSheet`, `ControlPlanePendingAction` |
+| [ControlPlaneSpaceSyncButton.swift](scan4d-ios/ControlPlaneSpaceSyncButton.swift) | Sync to Scan4D Server on a space (REQ-038) | `ControlPlaneSpaceSyncButton` |
+| [ControlPlaneTodoCard.swift](scan4d-ios/ControlPlaneTodoCard.swift) | Dashboard to-do list: focus scans the lab asked for (REQ-038) | `ControlPlaneTodoCard` |
+
+#### Peripherals and diagnostics
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
+| [MetaWearableManager.swift](scan4d-ios/MetaWearableManager.swift) | Meta Wearables DAT SDK lifecycle, streaming, proxy frames | `MetaWearableManager` |
+| [PerfDiag.swift](scan4d-ios/PerfDiag.swift) | Perf diagnostics: main-thread watchdog, frame gaps, I/O backlog | `PerfDiag`, `MainThreadWatchdog` |
+| [LocalizationDiag.swift](scan4d-ios/LocalizationDiag.swift) | Log-only relocalization diagnostics (dev-gated) | `LocalizationDiag` |
+| [DiagnosticsLogExport.swift](scan4d-ios/DiagnosticsLogExport.swift) | On-device export of the app's own unified-log entries (REQ-013) | `DiagnosticsLogExport` |
+
+#### Metal shaders (scan4d-ios/Shaders/)
+
+| File | Role | Key Types / Functions |
+|:-----|:-----|:----------------------|
+| [Shaders/PointCloud.metal](scan4d-ios/Shaders/PointCloud.metal) | VR point cloud vertex/fragment shaders | Metal GPU pipeline |
+| [Shaders/Bloom.metal](scan4d-ios/Shaders/Bloom.metal) | Bloom post-processing shader | Metal GPU pipeline |
+| [Shaders/Wireframe.metal](scan4d-ios/Shaders/Wireframe.metal) | AR wireframe rendering shaders | Metal GPU pipeline |
 | [Shaders/VertexColorProject.metal](scan4d-ios/Shaders/VertexColorProject.metal) | GPU vertex-color projection kernel: occlusion and anti-bleed guards (REQ-005) | kernels |
 | [Shaders/EquirectReproject.metal](scan4d-ios/Shaders/EquirectReproject.metal) | Equirect sampling kernels: cube faces, calibration (REQ-033) | kernels |
 
@@ -522,6 +601,26 @@ sequenceDiagram
 | **Status** | Complete; **changed by REQ-036**: phone stills are now automatic and video-stream frames are no longer saved. The tap-to-capture flow below remains as the 360° rig's shutter (Theta connected), which still arms the co-timed phone still. The coverage overlay, sharpness gate, stream fallback and export fields are unchanged. |
 | **Description** | Splat-optimized capture pipeline that pairs the continuous video-stream frames (depth/mesh coverage) with sharp, high-resolution still keyframes for downstream Gaussian-splat / NeRF texture detail. **Stillness detection:** pose-velocity thresholds (translational + rotational) with a confirmation window (`stillnessDurationRequired`) identify when the device is held still. **Tap-to-capture trigger:** stills never fire automatically — a shutter tap anywhere on the capture view arms the request, gated on confirmed stillness (taps while moving get a warning haptic and the reticle's "hold still" affordance). The armed request fires on the next capture tick, bypasses the stream-overlap gate (the tap is explicit intent, so a still can deliberately repeat a spot), auto-retries blurred results, and cancels if stillness breaks before it fires. **Hi-res keyframes:** on a tapped capture the app calls `ARSession.captureHighResolutionFrame` — a single still at the camera's native photo resolution (up to ~12MP) with its own pose/intrinsics — while the AR stream stays on a standard mesh-friendly video format (hiRes 16:9 *video* formats break Recon3D mesh integration on iPads). Transient hi-res failures are retried; after repeated consecutive failures (or a dropped completion, caught by a timeout watchdog) keyframes fall back to stream frames, which are still flagged `is_keyframe`. **Sharpness gating:** pose velocity confirms the *device* is still, but dim scenes force long exposures where hand tremor still blurs the photo — each hi-res still's sharpness is measured (Laplacian variance over the luma plane, on the background encode queue before the JPEG encode) and stills below `keyframeSharpnessFloor` are rejected and retried (up to `keyframeMaxRetries` per tapped request); after the budget the best capture is accepted. Exposure duration is recorded rather than gated (a dim room makes *every* still long-exposure, so gating on it would starve keyframes). Measured `sharpness` and `exposure_duration_s` are persisted per keyframe in `transforms.json`/Polycam camera JSONs so downstream can weight stills by actual quality (`blur_score`'s assumed 1.0 is unchanged). **Feedback loop:** a center `StillnessReticle` ring fills as the device settles, locks green with a "Tap for photo" hint when a tap will capture, and shows "Capturing…" while a tapped still is in flight; the accepted save triggers a shutter click + rigid haptic + white screen flash; entering stillness plays a soft chime + light haptic (audio gated by the `captureAudioEnabled` setting; haptics always on). **Three-state coverage overlay (AR mode):** green tint = unscanned, amber tint = depth captured but not photographed, clear camera feed = photo-grade. Coverage is tracked on a coarse world-space voxel grid (`PhotoCoverageGrid`, `photoCoverageVoxelSize` cells): each keyframe **stamps the grid by unprojecting its own depth map**, so only surfaces the photo actually measured are marked — occlusion-correct by construction (geometry behind a wall never enters the depth map, so it can't be marked covered through the wall — the failure mode of the earlier frustum/AABB test). An anchor drops its amber tint once ≥`photoCoverageAnchorFraction` of its mesh voxels are covered. The grid records per-voxel view-direction octants (angular diversity, secondary) and quantized camera-standpoint masks (~0.5m cells hashed to 8 bits — parallax/baseline diversity, the primary multi-view signal: rotating in place earns no credit, a sidestep does). Each stamp measures still-to-still voxel overlap (photogrammetry targets ~60%); the session's mean overlap and multi-standpoint fraction feed two additional coach nudges (`guidance.stillOverlap` "overlap your photos", `guidance.stillParallax` "step sideways") and export in the `photo_coverage` metadata block (`mean_still_overlap`, `standpoint_diversity`) for offline correlation of capture properties against splat quality. The default frame-capture overlap slider returns to 60% — with sharp stills carrying texture detail, fewer redundant motion frames are needed. The amber tint mesh is inflated ~4mm along vertex normals to avoid z-fighting the coincident occlusion fill. **Coverage-debt coaching:** when depth mesh outruns photo coverage (`photoCoverageFraction` below `photoCoverageDebtFraction` with enough geometry), ScanCoach nudges the user to hold still on the amber areas and tap. **Exports:** keyframes carry per-frame intrinsics/resolution overrides and `is_keyframe: true` in `transforms.json` and Polycam camera JSONs; `scan4d_metadata.json` records `keyframe_count` and a `photo_coverage` block (covered/occupied voxels + fraction) for backend dataset triage. HUD shows sharp/total frame counts and a Still indicator. |
 | **Source** | [FrameCaptureSession.swift](scan4d-ios/FrameCaptureSession.swift) — stillness detection, `requestStillCapture` tap arming, `requestHighResolutionKeyframe`, per-frame intrinsics in `FrameData`, `onKeyframeCaptured` callback, audio/haptic feedback · [StillnessReticle.swift](scan4d-ios/StillnessReticle.swift) — ring-fill reticle view · [CaptureView.swift](scan4d-ios/CaptureView.swift) — reticle + shutter flash integration, sharp/total HUD counters · [PhotoCoverageGrid.swift](scan4d-ios/PhotoCoverageGrid.swift) — sparse world-space voxel grid, depth-unproject stamping, view-octant tracking · [ARCoverageView.swift](scan4d-ios/ARCoverageView.swift) — three-state coverage overlay: amber tint mesh, `markPhotoCoverage` grid stamping + anchor re-evaluation, `onKeyframeCaptured` wiring · [ScanCoach.swift](scan4d-ios/ScanCoach.swift) — coverage-debt pause-for-photo guidance · [VertexColorAccumulator.swift](scan4d-ios/VertexColorAccumulator.swift) — keyframe-weighted vertex coloring · [AppConstants.swift](scan4d-ios/AppConstants.swift) — tuning constants (`stillness*`, `motionBlurAngularVelocity`, `photoCoverage*`, `photoTint*`, `captureFlash*`) · [schemas/](schemas/) — `is_keyframe`, per-frame intrinsics, `keyframe_count`, `photo_coverage` schema updates |
+
+#### REQ-031 Still Resolution by Video Format
+
+When the device is held still, the app requests a native-resolution still via `ARSession.captureHighResolutionFrame` (iOS 16+). **The still's resolution is determined by the active video format's camera configuration**, not by the device alone: standard (non-hiRes) video formats deliver a modestly upscaled sensor readout, while formats flagged `isRecommendedForHighResolutionFrameCapturing` bind the full photo sensor. hiRes **16:9** video formats break Recon3D mesh integration on iPads (zero mesh geometry), but the 4:3 hiRes formats (`1920×1440 @ 30fps [hiRes]`) are mesh-safe — **the app defaults to the highest 4:3 hiRes 30fps format**, falling back to the best standard 4:3 format when none exists. The Developer Mode video-format picker can force any format for per-device testing.
+
+| Device class | Standard 4:3 format | 4:3 [hiRes] format (default) |
+| :--- | :--- | :--- |
+| iPad Pro M2/M4 | 2016×1512 (verified on-device) | **4032×3024 — verified on-device, mesh intact** |
+| iPad Pro A12Z (2020) | untested | **4032×3024 — verified on-device (auto-selected), mesh intact**; 16:9 1080p [hiRes] also verified (4224×2376, narrower FOV) |
+| iPhone Pro (13 Pro and later) | untested | 4032×3024 expected (per Apple's ARKit 6 guidance) — untested |
+| Non-Pro / no LiDAR | n/a (Lite Mode — stream frames only) | n/a |
+
+Scope of the 16:9 mesh breakage: the zero-mesh failure has only been reproduced with the
+**3840×2160 hiRes formats on M-series iPads**. On the A12Z iPad (which offers no 4K
+formats), the 16:9 `1920×1080 @ 30fps [hiRes]` format ran with mesh fully intact — so
+the auto-selection's 4:3 preference is a conservative choice, not a hard requirement,
+and mixed-aspect captures are fine downstream because every frame exports per-frame
+intrinsics/resolution.
+
+To check a device: the `[ARConfig]` launch log lists every supported format with its `[hiRes]` flag and the `◀ SELECTED` marker, and each captured keyframe logs `[FrameCapture] Hi-res keyframe captured: W×H`. Please update this table as devices are verified.
 
 ---
 
