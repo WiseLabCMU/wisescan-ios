@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0](https://github.com/WiseLabCMU/scan4d-ios/compare/v0.10.0...v0.11.0) (2026-11-13)
+
+
+### Features
+
+* **sync:** choose which spaces sync, and keep test scans on the device ([88cc815](https://github.com/WiseLabCMU/scan4d-ios/commit/88cc815eead4e6a5e50e894a0d095571e57adc9b))
+* **sync:** choose which spaces sync, and keep test scans on the device ([d63296b](https://github.com/WiseLabCMU/scan4d-ios/commit/d63296b5c04cb97575211407fe7d90c9a540c5cf))
+
 ## [0.10.0](https://github.com/WiseLabCMU/scan4d-ios/compare/v0.9.0...v0.10.0) (2026-11-12)
 
 
