@@ -187,10 +187,11 @@ struct CaptureView: View {
     }
 
     /// Companion 360° still for an ACCEPTED shutter tap: capture a Theta equirect into the
-    /// active scan, tagged with the phone's ARKit world pose + timestamp at tap time. Called
-    /// from the shutter-tap handler only when `requestStillCapture()` accepts, so the Theta
-    /// inherits the phone still's one-per-stillness-pause gate — every pause yields a co-timed
-    /// phone-hi-res + 360° pair, the raw material for the deferred rig hand–eye calibration.
+    /// active scan, tagged with the phone's ARKit world pose + timestamp at that moment. Run by
+    /// `FrameCaptureSession` when the tap fires, once the device has settled after the tap's own
+    /// wobble, so the pose is the settled one and the Theta inherits the phone still's
+    /// one-per-stillness-pause gate — every pause yields a co-timed phone-hi-res + 360° pair,
+    /// the raw material for the deferred rig hand–eye calibration.
     /// Inert unless a Theta is connected and a raw-data dir is open; the pose is snapshotted
     /// here (synchronously) before the ~seconds-long trigger/download.
     private func captureThetaStill() {
@@ -737,26 +738,27 @@ struct CaptureView: View {
         // Live ARKit Scene Reconstruction View
         arCoverageLayer
             .ignoresSafeArea()
-            // Shutter tap — the deterministic still trigger, gated on stillness.
-            // Attached to the AR view (behind the HUD) so buttons keep their own
-            // taps; fires nothing unless recording. A warning haptic answers taps
-            // while moving ("hold still first"); capture feedback (shutter click +
-            // flash) comes from the accepted save itself.
+            // Shutter tap — the deterministic still trigger. Attached to the AR view
+            // (behind the HUD) so buttons keep their own taps; fires nothing unless
+            // recording. The tap itself wobbles the rig, so it arms the shot and the
+            // photos wait until the device has settled again (the reticle's ring empties
+            // and refills, "Hold still…"); a light haptic acknowledges the tap, and the
+            // shutter click + flash come from the save itself. A warning haptic answers a
+            // tap while one is already waiting, or when this pause already gave its photo.
             //
-            // MERGE FUSION (still-source-360 × capture-quality): an ACCEPTED tap also
-            // fires the Theta 360° still (inert when no camera is connected), so each
-            // stillness pause yields a co-timed phone-hi-res + 360° pair with a shared
-            // phone pose — the calibration raw material this branch exists for. A
-            // refused tap fires neither, keeping the pair invariant.
+            // MERGE FUSION (still-source-360 × capture-quality): when the tap fires, the
+            // Theta 360° still fires with the phone still (inert when no camera is
+            // connected), so each stillness pause yields a co-timed phone-hi-res + 360°
+            // pair with a shared, settled phone pose — the calibration raw material this
+            // branch exists for. A refused or timed-out tap fires neither.
             //
             // Automatic room stills (docs/design/capture-modes.md): phone stills fire on their
             // own, so the tap is the 360° rig's shutter only. With a camera connected it still
             // arms the phone still too, keeping the co-timed pair the rig calibration needs.
             .onTapGesture {
                 guard isRecording, thetaManager.isConnected else { return }
-                if frameCaptureSession.requestStillCapture() {
+                if frameCaptureSession.requestStillCapture(onFire: { captureThetaStill() }) {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    captureThetaStill()
                 } else {
                     UINotificationFeedbackGenerator().notificationOccurred(.warning)
                 }
@@ -1245,6 +1247,12 @@ struct CaptureView: View {
         }
         .onChange(of: scanStats.anchorCount) {
             evaluateScanCoach()
+        }
+        // A rig tap the device never settled after (FrameCaptureSession.tapSettleTimeoutCount).
+        .onChange(of: frameCaptureSession.tapSettleTimeoutCount) { _, count in
+            guard count > 0 else { return }
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            showTransientMessage("No photo: hold the rig still after tapping, then tap again", duration: 3)
         }
         .onChange(of: isRecording) { _, recording in
             if !recording {

@@ -16,10 +16,11 @@ struct StillnessReticleHost: View {
     }
 }
 
-/// Center-screen capture reticle that teaches the hold-still-then-tap rhythm:
-/// the ring fills as the device settles, locks green with a camera glyph when a
-/// shutter tap will capture, and shows "Capturing…" while a tapped still is in
-/// flight (sharpness retries included).
+/// Center-screen capture reticle for the rig's tap: the ring fills as the device
+/// settles and locks green with a camera glyph when it is still. A tap restarts it
+/// (the tap itself wobbles the rig): "Hold still…" while the tapped shot waits for the
+/// device to settle again, then "Capturing…" while it is in flight (sharpness retries
+/// included).
 struct StillnessReticle: View {
     /// Ring-fill progress (0 = moving, 1 = confirmed still).
     let progress: Double
@@ -56,9 +57,10 @@ struct StillnessReticle: View {
             }
             .frame(width: 54, height: 54)
 
-            // Shutter hint — the tap is the trigger, so say so the moment it's armed.
-            if isStill {
-                Text(isCapturePending ? "Capturing…" : "Tap for photo")
+            // Shutter hint — the tap is the trigger, so say so the moment it's armed; after a
+            // tap, say what the shot is waiting for.
+            if isStill || isCapturePending {
+                Text(isCapturePending ? (isStill ? "Capturing…" : "Hold still…") : "Tap for photo")
                     .font(.caption2.weight(.semibold))
                     .foregroundColor(isCapturePending ? .white : .green)
                     .padding(.horizontal, 8)
@@ -92,6 +94,13 @@ struct StillnessReticle: View {
     ZStack {
         Color.gray
         StillnessReticle(progress: 1, isStill: true, isCapturePending: false)
+    }
+}
+
+#Preview("Tapped, settling") {
+    ZStack {
+        Color.gray
+        StillnessReticle(progress: 0.4, isStill: false, isCapturePending: true)
     }
 }
 

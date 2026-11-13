@@ -132,7 +132,9 @@ focus capture with the region loaded. Delivery from the server (polling) waits f
   before, so they were not restructured.
 - **The 360° rig keeps its tap.** With a Theta connected, the tap still arms a phone still with the
   360° still: the rig calibration needs the co-timed pair. The stillness reticle and chime follow.
-- **Room-scan spacing** is 15° of turn or parallax, or 0.5 m walked, one request at most every 0.5 s (2 s when hot). On the rig, a held pause belongs to the tap (no automatic still while confirmed still), and a tap during an automatic still in flight adopts it.
+  The tap itself wobbles the rig, so both fire only once the device has settled again after it
+  (stillness restarts from the tap's pose; `tapSettleTimeoutSeconds` drops one that never settles).
+- **Room-scan spacing** is 15° of turn or parallax, or 0.5 m walked, one request at most every 0.5 s (2 s when hot). On the rig, a held pause belongs to the tap (no automatic still while confirmed still or while a tap waits to settle), and a tap waits for an automatic still in flight to finish.
 - **The map's frame is a precondition.** The region and every focus still must be in the room
   scan's frame, so the session tracks whether it is in it (`Coordinator.inMapFrame`: relocalizing
   then normal since tracking last initialized; any tracking reset clears it). The box exists only

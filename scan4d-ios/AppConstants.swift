@@ -587,6 +587,7 @@ enum AppConstants {
     static let stillnessTranslationalThreshold: Float = 0.02   // m/s — translational velocity below this = "still"
     static let stillnessAngularThreshold: Float = 0.1          // rad/s — rotational velocity below this = "still"
     static let stillnessDurationRequired: TimeInterval = 0.3   // seconds device must be still before counting as "sharp" capture
+    static let tapSettleTimeoutSeconds: TimeInterval = 8       // a rig tap waits this long for the device to settle after the tap's own wobble, then is dropped (warning haptic + message)
     static let hiResCaptureTimeoutSeconds: TimeInterval = 5.0  // watchdog: re-request if a hi-res completion never arrives
     static let hiResMaxFailures: Int = 3                       // consecutive hi-res failures before latching stream-frame fallback
     static let keyframeSharpnessFloor: Float = 20.0            // Laplacian variance below this = grossly blurred still → retry (conservative: plain walls still pass on sensor noise)
