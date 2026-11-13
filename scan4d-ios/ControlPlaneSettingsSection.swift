@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The Server tab's connection: the Scan4D server this phone reports its spaces, scans and stitches
 /// to (`ControlPlaneSync`; scan4d-server README). Its host, the shared password it may want (kept
-/// in the Keychain), this phone's name, the certificate override and Auto sync. Also what the
+/// in the Keychain), this phone's name and the certificate override (which spaces sync is the tab's Spaces). Also what the
 /// password prompt shows (`ControlPlanePasswordPrompt`).
 struct ControlPlaneSettingsSection: View {
     /// Opened for a tapped Sync whose server wants a password (ControlPlanePasswordPrompt): say so
@@ -12,7 +12,6 @@ struct ControlPlaneSettingsSection: View {
     @AppStorage(AppConstants.Key.controlPlaneHost) private var host = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.controlPlaneDeviceLabel) private var deviceLabel = ""
     @AppStorage(AppConstants.Key.controlPlaneAllowUntrusted) private var allowUntrusted = false
-    @AppStorage(AppConstants.Key.controlPlaneAutoSync) private var autoSyncRaw = AppConstants.controlPlaneAutoSync
     @State private var password = ControlPlaneSecret.password
     @FocusState private var passwordFocused: Bool
 
@@ -73,24 +72,6 @@ struct ControlPlaneSettingsSection: View {
             }
             .padding(.vertical, 4)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Auto sync")
-                        .foregroundColor(.white)
-                    Spacer()
-                    Picker("Auto sync", selection: $autoSyncRaw) {
-                        ForEach(ControlPlaneAutoSync.allCases, id: \.self) { mode in
-                            Text(mode.title).tag(mode.rawValue)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .fixedSize()
-                }
-                Text("\(autoSyncCaption) Once synced, a space keeps syncing. \(sync.syncedSpaces.count) space(s) synced so far.")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            .padding(.vertical, 4)
         } header: {
             Text("CONNECTION")
         } footer: {
@@ -105,9 +86,6 @@ struct ControlPlaneSettingsSection: View {
         }
         .onChange(of: deviceLabel) { _, _ in
             sync.requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
-        }
-        .onChange(of: autoSyncRaw) { _, _ in
-            sync.requestSync(after: .seconds(1))
         }
         .onChange(of: allowUntrusted) { _, _ in
             sync.requestSync(after: .seconds(1))
@@ -128,15 +106,6 @@ struct ControlPlaneSettingsSection: View {
     private var passwordRequestText: String {
         let server = ControlPlaneClient.baseURL(fromHost: host)?.host() ?? "The control plane"
         return "\(server) needs its password. Enter it below, then tap Done to go on."
-    }
-
-    /// What Auto sync does in the chosen mode.
-    private var autoSyncCaption: String {
-        switch ControlPlaneAutoSync(rawValue: autoSyncRaw) ?? .new {
-        case .all: return "Every space on this phone syncs on its own, those from before it joined too."
-        case .new: return "Spaces started after this phone joined sync on their own; earlier ones go when you tap Sync to Scan4D Server in the space, or Sync on a stitched map in the graph view."
-        case .off: return "Only the spaces you send with Sync to Scan4D Server in a space, or Sync on a stitched map in the graph view."
-        }
     }
 }
 

@@ -356,9 +356,10 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(files.count, 3)
     }
 
-    /// The spaces sent with Sync are reported, plus what Auto sync adds (all, those started since
-    /// the phone joined, or none); a stitch goes when both of its spaces do.
-    func testOnlySyncedAndAutoSyncedSpacesAreReported() throws {
+    /// Selective sync: the spaces turned on are reported, plus new ones (started since the phone
+    /// joined) while Sync new spaces is on, never one kept on this device; a stitch goes when both
+    /// of its spaces do.
+    func testOnlySyncedNewAndNotLocalSpacesAreReported() throws {
         let context = try StitchTestSupport.makeInMemoryContext()
         let old = StitchTestSupport.makeLocation(id: UUID(), name: "Old", scanId: UUID(), in: context)
         let sent = StitchTestSupport.makeLocation(id: UUID(), name: "Sent", scanId: UUID(), in: context)
@@ -377,21 +378,33 @@ final class ControlPlaneTests: XCTestCase {
         let locations = [old.location, sent.location, new.location]
         let joined = Date(timeIntervalSince1970: 1_000)
 
-        func reported(_ mode: ControlPlaneAutoSync) -> Set<UUID> {
-            Set(ControlPlaneSync.spacesToReport(locations, synced: [sent.location.id],
-                                                newSince: mode.newSince(joinedAt: joined)).map(\.id))
+        func reported(newSince: Date?, local: Set<UUID> = []) -> Set<UUID> {
+            Set(ControlPlaneSync.spacesToReport(locations, synced: [sent.location.id], local: local,
+                                                newSince: newSince).map(.id))
         }
-        XCTAssertEqual(reported(.all), [old.location.id, sent.location.id, new.location.id])
-        XCTAssertEqual(reported(.new), [sent.location.id, new.location.id])
-        XCTAssertEqual(reported(.off), [sent.location.id])
-        // Before the first sync nothing is new yet: only what was sent.
-        XCTAssertNil(ControlPlaneAutoSync.new.newSince(joinedAt: nil))
+        // Sync new spaces on (new since joining), off, and before the first sync (nothing new yet).
+        XCTAssertEqual(reported(newSince: joined), [sent.location.id, new.location.id])
+        XCTAssertEqual(reported(newSince: nil), [sent.location.id])
+        // Saved with Save on This Device; and a synced space turned off.
+        XCTAssertEqual(reported(newSince: joined, local: [new.location.id]), [sent.location.id])
+        XCTAssertEqual(reported(newSince: joined, local: [sent.location.id]), [new.location.id])
 
         let links = ControlPlaneSync.linksToReport(try context.fetch(FetchDescriptor<StitchLink>()),
-                                                   spaces: reported(.new))
+                                                   spaces: reported(newSince: joined))
         XCTAssertEqual(links.count, 1)
         let ends = Set([links.first?.endpointAScan?.id, links.first?.endpointBScan?.id].compactMap { $0 })
         XCTAssertEqual(ends, [sent.scan.id, new.scan.id])
+    }
+
+    /// Sync new spaces carries over the earlier Auto sync: its Off kept new spaces back; All and New
+    /// both synced them. A stored value wins, and the default is on.
+    func testSyncNewSpacesCarriesOverAutoSync() {
+        XCTAssertTrue(ControlPlaneSync.syncNewSpacesDefault(stored: nil, legacyAutoSync: nil))
+        XCTAssertTrue(ControlPlaneSync.syncNewSpacesDefault(stored: nil, legacyAutoSync: "new"))
+        XCTAssertTrue(ControlPlaneSync.syncNewSpacesDefault(stored: nil, legacyAutoSync: "all"))
+        XCTAssertFalse(ControlPlaneSync.syncNewSpacesDefault(stored: nil, legacyAutoSync: "off"))
+        XCTAssertFalse(ControlPlaneSync.syncNewSpacesDefault(stored: false, legacyAutoSync: "new"))
+        XCTAssertTrue(ControlPlaneSync.syncNewSpacesDefault(stored: true, legacyAutoSync: "off"))
     }
 
     /// The sidecar is written with SaveRegistration's own (camelCase) keys, at the scan's top level

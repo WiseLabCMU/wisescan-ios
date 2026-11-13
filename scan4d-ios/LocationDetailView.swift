@@ -201,7 +201,7 @@ struct LocationDetailView: View {
 
                             // Control plane: keep this space in sync with the Scan4D server.
                             if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
-                                ControlPlaneSpaceSyncButton(spaceIds: [location.id])
+                                ControlPlaneSpaceSyncButton(location: location)
                             }
                             // No export format here: Share asks for one each time (ShareFormatMenu).
                         }
