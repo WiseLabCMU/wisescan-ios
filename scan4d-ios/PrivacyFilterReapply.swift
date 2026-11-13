@@ -198,6 +198,7 @@ enum PrivacyFilterReapply {
         try? fm.createDirectory(at: masksDir, withIntermediateDirectories: true)
         var written = 0
         var failed = 0
+        let started = DispatchTime.now().uptimeNanoseconds
         for (index, stem) in frames.enumerated() {
             report?(index + 1, frames.count)
             autoreleasepool {
@@ -209,7 +210,11 @@ enum PrivacyFilterReapply {
                 }
             }
         }
-        PerfDiag.log("[Privacy] masks generated: \(written)/\(frames.count), \(failed) failed closed (whole frame masked)")
+        PerfDiag.log({
+            let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
+            return String(format: "[Privacy] masks generated: %d/%d, %d failed closed (whole frame masked), in %.1f s (%.0f ms a photo)",
+                          written, frames.count, failed, seconds, seconds * 1000 / Double(frames.count))
+        }())
         return written
     }
 

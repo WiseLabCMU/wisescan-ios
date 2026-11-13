@@ -81,6 +81,7 @@ extension ScanExportManager {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         var clean = 0, blurred = 0
         var excluded: [String] = []
+        let started = DispatchTime.now().uptimeNanoseconds
         for (index, url) in stills.enumerated() {
             if stop?.isStopped == true { break }
             phase?(.counted("Privacy check", index + 1, of: stills.count))
@@ -122,6 +123,12 @@ extension ScanExportManager {
             try? data.write(to: stagingDir.appendingPathComponent("privacy_excluded.json"))
         }
         focusLog.notice("focus privacy pass: \(clean, privacy: .public) clean, \(blurred, privacy: .public) blurred, \(excluded.count, privacy: .public) excluded of \(stills.count, privacy: .public)")
+        PerfDiag.log({
+            let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
+            let each = stills.isEmpty ? 0 : seconds * 1000 / Double(stills.count)
+            return String(format: "[Privacy] focus privacy pass: %d clean, %d blurred, %d excluded of %d stills in %.1f s (%.0f ms a still)",
+                          clean, blurred, excluded.count, stills.count, seconds, each)
+        }())
     }
 }
 
@@ -171,6 +178,7 @@ enum FocusStillPrivacy {
     /// is applied after capture (`PrivacyFilterReapply`), whose frames come from the same
     /// portrait capture.
     static func sensorPersonMask(jpeg data: Data) -> Result<CGImage?, EquirectPrivacyBlur.StringError> {
+        let started = DispatchTime.now().uptimeNanoseconds
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             return .failure(.init("decode failed"))
         }
@@ -182,18 +190,32 @@ enum FocusStillPrivacy {
         guard let working = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return .failure(.init("working decode failed"))
         }
+        let decoded = DispatchTime.now().uptimeNanoseconds
         // Sensor landscape to the portrait the operator held: the capture view's fixed map.
         let upright = CIImage(cgImage: working).oriented(.right)
         guard let uprightImage = context.createCGImage(upright, from: upright.extent) else {
             return .failure(.init("upright render failed"))
         }
-        switch PersonCheck.mask(upright: uprightImage, settings: personCheckSettings) {
+        let prepared = DispatchTime.now().uptimeNanoseconds
+        var timing = PersonCheck.Timing()
+        let result = PersonCheck.mask(upright: uprightImage, settings: personCheckSettings, timing: &timing)
+        PerfDiag.log({
+            let decodeMs = Double(decoded - started) / 1_000_000, uprightMs = Double(prepared - decoded) / 1_000_000
+            let found: String
+            switch result {
+            case .failure(let failure): found = "failed (\(failure.message))"
+            case .success(nil): found = "no person"
+            case .success(let mask?): found = mask.summary
+            }
+            return String(format: "[Privacy] person check %.0f ms (decode %.0f, upright %.0f, whole %.0f, tiles %.0f, combine %.0f): ",
+                          decodeMs + uprightMs + timing.total, decodeMs, uprightMs, timing.whole, timing.tiles, timing.combine) + found
+        }())
+        switch result {
         case .failure(let failure):
             return .failure(.init(failure.message))
         case .success(nil):
             return .success(nil)
         case .success(let found?):
-            PerfDiag.log("[Privacy] person check: \(found.summary)")
             let mask = EquirectPrivacyBlur.FaceMask(bytes: found.bytes, width: found.width, height: found.height, hasPerson: true)
             guard let sensorMask = sensorOrientationMask(mask) else { return .failure(.init("mask rotation failed")) }
             return .success(sensorMask)

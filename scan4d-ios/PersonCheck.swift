@@ -44,14 +44,37 @@ nonisolated enum PersonCheck {
         let message: String
     }
 
+    /// Where one check's time went, in milliseconds, for the perf log.
+    struct Timing: Sendable {
+        /// The whole photo: segmentation and the three box detectors, one Vision pass.
+        var whole = 0.0
+        /// Segmentation on the tiles: each tile's crop and its Vision pass.
+        var tiles = 0.0
+        /// Combining the results into one mask, on the CPU.
+        var combine = 0.0
+        var total: Double { whole + tiles + combine }
+    }
+
     /// A mask pixel covers this many photo pixels on a side.
     static let maskScale = 4
 
     /// The person mask of `image` (upright), nil when nothing finds a person.
     static func mask(upright image: CGImage, settings: Settings) -> Result<Mask?, Failure> {
+        var timing = Timing()
+        return mask(upright: image, settings: settings, timing: &timing)
+    }
+
+    /// The same, recording where the time went in `timing`.
+    static func mask(upright image: CGImage, settings: Settings, timing: inout Timing) -> Result<Mask?, Failure> {
         let width = image.width, height = image.height
         let maskWidth = max(1, width / maskScale), maskHeight = max(1, height / maskScale)
         var bytes = [UInt8](repeating: 0, count: maskWidth * maskHeight)
+        var started = DispatchTime.now().uptimeNanoseconds
+        func lap() -> Double {
+            let now = DispatchTime.now().uptimeNanoseconds
+            defer { started = now }
+            return Double(now - started) / 1_000_000
+        }
 
         // The whole photo: segmentation and the three box detectors share one handler.
         let whole = segmentationRequest()
@@ -68,9 +91,11 @@ nonisolated enum PersonCheck {
         guard let wholeBuffer = whole.results?.first?.pixelBuffer else {
             return .failure(Failure(message: "Vision returned no segmentation mask"))
         }
+        timing.whole += lap()
         let full = CGRect(x: 0, y: 0, width: width, height: height)
         let wholeHits = stamp(wholeBuffer, covering: full, threshold: settings.maskThreshold,
                               into: &bytes, maskWidth: maskWidth, maskHeight: maskHeight)
+        timing.combine += lap()
 
         // Overlapping tiles.
         var tileHits = 0
@@ -88,10 +113,12 @@ nonisolated enum PersonCheck {
             guard let buffer = request.results?.first?.pixelBuffer else {
                 return .failure(Failure(message: "Vision returned no tile segmentation mask"))
             }
+            timing.tiles += lap()
             if stamp(buffer, covering: tile, threshold: settings.maskThreshold,
                      into: &bytes, maskWidth: maskWidth, maskHeight: maskHeight) > 0 {
                 tileHits += 1
             }
+            timing.combine += lap()
         }
 
         // Boxes.
@@ -100,6 +127,7 @@ nonisolated enum PersonCheck {
         for box in bodyBoxes + faceBoxes {
             fill(normalizedBox: box, padding: settings.boxPadding, into: &bytes, maskWidth: maskWidth, maskHeight: maskHeight)
         }
+        timing.combine += lap()
 
         guard bytes.contains(where: { $0 != 0 }) else { return .success(nil) }
         let summary = "whole \(wholeHits > 0 ? "yes" : "no"), tiles \(tileHits), body boxes \(bodyBoxes.count), faces \(faceBoxes.count)"
