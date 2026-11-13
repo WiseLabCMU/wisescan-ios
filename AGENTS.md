@@ -12,12 +12,12 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 - Never commit debug-only file-sharing Info.plist keys, raw capture artifacts, vendor SDK binaries, or credentials (Meta `MetaAppID` / `ClientToken` values, any SDK app secret). The privacy guard (`scripts/privacy-guard.sh`) is the pattern library the hook and CI share, and it refuses all of these.
 - The repo was renamed from wisescan-ios in November 2026. Two identifiers keep the old name on purpose, never rename them: the bundle ID `edu.cmu.wiselab.wisescan-ios` (an App Store app's bundle ID can never change; a new one is a new app, and testers would lose their scans, settings and stored password) and the Meta glasses URL scheme `wisescandat` (the Meta AI app returns to the app by it). See docs/RELEASE.md.
 - Rewrite only your own unpushed commits; never rebase, amend, or force-push someone else's.
-- Documentation ships with the feature: README features and tree, a REQ entry, the App Store copy, PRIVACY.md when data handling changes, the in-app user guide, and this index.
+- Documentation ships with the feature: a README feature bullet (at most two sentences; detail goes in REQUIREMENTS), a REQ entry and Source File Index rows, the App Store copy, PRIVACY.md when data handling changes, the in-app user guide, and this index.
 - A new Developer Mode option (Settings) goes into `AppConstants.developerOptionDefaults`, key and default, in the same change. Restore Default Developer Options and turning Developer Mode off reset only that list, so an option missing from it keeps its bench value in production use.
 
 ## Start here
-- [README.md](README.md) — what Scan4D is, device-support matrix, features, architecture tree, export formats, backend receivers, quick start.
-- [REQUIREMENTS.md](REQUIREMENTS.md) — single source of truth for features, architecture, data model, and implementation status (REQ-### entries, including which are "device test pending").
+- [README.md](README.md) — what Scan4D is, device-support matrix, short feature list, export formats, backend repos, quick start.
+- [REQUIREMENTS.md](REQUIREMENTS.md) — single source of truth for features, architecture, the Source File Index (every source file by area), data model, and implementation status (REQ-### entries, including which are "device test pending").
 
 ## Conventions & development rules
 - [CONTRIBUTING.md](CONTRIBUTING.md) — mandatory rules for all contributors, **including agents**: commit format, code style (SwiftData enums, `@Observable`/simd), AR session lifecycle, privacy patterns, performance/VIO invariants, and the **stitching / scan-linking implementation contract**.

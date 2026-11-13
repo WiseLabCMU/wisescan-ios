@@ -85,6 +85,9 @@ struct CaptureView: View {
     // Scan4D properties
     @State var showNamePrompt = false
     @State var newLocationName = ""
+    /// The naming prompt's sync choice for the new space (nil: no Scan4D server set), applied once
+    /// it is saved (`savePendingScan`).
+    @State var pendingSyncChoice: Bool?
     @State var pendingScan: PendingScanData?
     @State var isProcessingMesh = false
     @State var isWaitingToSave = false
@@ -1173,16 +1176,14 @@ struct CaptureView: View {
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
-            Button("Save", action: {
-                if isProcessingMesh {
-                    isWaitingToSave = true
-                    saveMessageIcon = nil
-                    saveMessage = "Adding location details..."
-                } else {
-                    savePendingScan()
-                }
-            })
-            .disabled(newLocationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("Save", action: { saveFromNamePrompt(sync: namePromptSyncDefault) })
+                .disabled(namePromptNameIsEmpty)
+            // With a Scan4D server set: the space's other sync choice, made where its maker knows
+            // whether it is a test (selective sync; docs/design/sync-bundle.md).
+            if let alternative = namePromptAlternative {
+                Button(alternative.title, action: { saveFromNamePrompt(sync: alternative.sync) })
+                    .disabled(namePromptNameIsEmpty)
+            }
             // Labeled as the discard it is (was "Cancel"): recording has already ended and
             // the only alternatives are save-with-name or delete. Routes through the
             // destructive-warning confirmation — every Discard Scan does.
@@ -1190,7 +1191,7 @@ struct CaptureView: View {
                 showPendingDiscardConfirm = true
             }
         } message: {
-            Text("Enter a unique name for this space so you can add scans later.")
+            Text(namePromptMessage)
         }
         // Both destructive-discard confirmations live in a ViewModifier — inlining two more
         // .alert blocks here pushed SwiftUI's type-checker over its time budget.

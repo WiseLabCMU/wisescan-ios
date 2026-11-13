@@ -65,7 +65,7 @@ The same keys can also leak via **Xcode build settings**: `INFOPLIST_KEY_UIFileS
 
 ### Credentials never enter the repo
 
-The Meta Wearables toolkit reads `MetaAppID`, `ClientToken` and `TeamID` from the app's Info.plist (README, Testing Guidelines); the Insta360 SDK, if it is ever integrated, takes an App ID and secret in code. Real values stay on the developer's machine. The privacy guard refuses, locally and in CI:
+The Meta Wearables toolkit reads `MetaAppID`, `ClientToken` and `TeamID` from the app's Info.plist ([docs/BUILDING.md](docs/BUILDING.md#meta-wearables-setup)); the Insta360 SDK, if it is ever integrated, takes an App ID and secret in code. Real values stay on the developer's machine. The privacy guard refuses, locally and in CI:
 
 - a `.plist` whose `MetaAppID` or `ClientToken` carries a value (an empty string or a `$(BUILD_SETTING)` placeholder is fine);
 - a Swift file with a literal `setAppid(_:secret:)` call that is not the vendor's placeholder;
@@ -210,8 +210,8 @@ For CLI build and lint commands (CI / no-signing validation, SwiftLint baseline 
 
 When adding a new feature, update the following docs alongside the source code:
 
-1. **[README.md](README.md)** — Add a bullet under Features and an entry under Architecture.
-2. **[REQUIREMENTS.md](REQUIREMENTS.md)** — Add a REQ-NNN entry (feature matrix row + detailed section) with source map entries.
+1. **[README.md](README.md)** — Add a bullet under Features: at most two direct sentences and a link to the REQ entry. Detail goes in REQUIREMENTS.md, not the README.
+2. **[REQUIREMENTS.md](REQUIREMENTS.md)** — Add a REQ-NNN entry (feature matrix row + detailed section) with source map entries, and a row in the Source File Index for each new source file.
 3. **[docs/APPSTORE.md](docs/APPSTORE.md)** — Add a line to the App Store description.
 4. **[docs/PRIVACY.md](docs/PRIVACY.md)** — Update if the feature touches data collection, camera usage, or personal data processing.
 5. **[scan4d-ios/UserGuideView.swift](scan4d-ios/UserGuideView.swift)** — The in-app guide is documentation that lives in SwiftUI; update it with any user-facing workflow, tip, or export change.

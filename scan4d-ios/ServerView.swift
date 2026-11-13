@@ -4,9 +4,10 @@ import SwiftUI
 // MARK: - The Server tab
 
 /// The Scan4D server this phone syncs with (scan4d-server), in one place: how the last sync went,
-/// with Sync now; the bundles waiting to go, with the Wi-Fi rule and the checklist; and the
-/// connection (host, password, this phone's name, certificates, Auto sync). What the phone can
-/// later pull down from the server (maps from other devices) belongs here too.
+/// with Sync now; which spaces sync (the default for new ones, and each space's switch); the
+/// bundles waiting to go, with the Wi-Fi rule and the checklist; and the connection (host,
+/// password, this phone's name, certificates). What the phone can later pull down from the server
+/// (maps from other devices) belongs here too.
 struct ServerView: View {
     @Query(sort: \ScanLocation.name) private var locations: [ScanLocation]
     @AppStorage(AppConstants.Key.controlPlaneHost) private var host = AppConstants.controlPlaneHost
@@ -16,6 +17,7 @@ struct ServerView: View {
             List {
                 ServerStatusSection()
                 if ControlPlaneClient.baseURL(fromHost: host) != nil {
+                    ServerSpacesSection(locations: locations)
                     PendingBundlesSections(locations: locations)
                     UnblurredScansSection(locations: locations)
                 }
@@ -203,8 +205,109 @@ struct ServerStatusSection: View {
     }
 }
 
+// MARK: - Which spaces sync
+
+/// Selective sync, as cloud drives choose folders: the default for new spaces, and the list of
+/// every space with its switch. A space saved with Save on This Device, or turned off, stays here.
+struct ServerSpacesSection: View {
+    let locations: [ScanLocation]
+    private var sync: ControlPlaneSync { ControlPlaneSync.shared }
+
+    var body: some View {
+        let syncing = locations.filter { sync.syncs($0) }.count
+        Section {
+            Toggle("Sync new spaces", isOn: Binding(get: { sync.syncNewSpaces },
+                                                     set: { sync.setSyncNewSpaces($0) }))
+                .foregroundColor(.white)
+            NavigationLink {
+                SpacesSyncList()
+            } label: {
+                HStack {
+                    Text("Choose spaces")
+                        .foregroundColor(.white)
+                    Spacer()
+                    Text("\(syncing) of \(locations.count) syncing")
+                        .foregroundColor(.gray)
+                }
+            }
+        } header: {
+            Text("SPACES")
+        } footer: {
+            Text(sync.syncNewSpaces
+                 ? "A new space syncs unless you save it with Save on This Device. Turn any space off to keep it on this device; if it had synced, the server marks it gone and keeps what it has."
+                 : "A new space stays on this device unless you save it with Save and Sync, or turn it on. Turn any space off to keep it on this device; if it had synced, the server marks it gone and keeps what it has.")
+                .font(.caption2)
+                .foregroundColor(.gray)
+        }
+        .listRowBackground(Color.white.opacity(0.05))
+    }
+}
+
+/// Every space with its sync switch and badge, and Turn All On for a backlog from before the phone
+/// joined.
+struct SpacesSyncList: View {
+    @Query(sort: \ScanLocation.name) private var locations: [ScanLocation]
+    @State private var confirmAllOn = false
+    private var sync: ControlPlaneSync { ControlPlaneSync.shared }
+
+    var body: some View {
+        List {
+            if locations.isEmpty {
+                Text("No spaces on this device yet.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                    .listRowBackground(Color.white.opacity(0.05))
+            }
+            ForEach(locations, id: \.self) { location in
+                let id: UUID = location.id
+                HStack {
+                    SyncBadge(location: location, compact: true)
+                    Toggle(location.name, isOn: Binding(get: { sync.syncs(location) },
+                                                        set: { sync.setSyncing([id], $0) }))
+                        .foregroundColor(.white)
+                }
+                .listRowBackground(Color.white.opacity(0.05))
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(Color.black)
+        .navigationTitle("Spaces")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Turn All On") { confirmAllOn = true }
+                    .disabled(locations.allSatisfy { sync.syncs($0) })
+            }
+        }
+        .alert("Sync every space?", isPresented: $confirmAllOn) {
+            Button("Turn All On") {
+                let ids: [UUID] = locations.map { $0.id }
+                sync.setSyncing(ids, true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All \(locations.count) spaces on this device go to the Scan4D server, the ones kept on this device too.")
+        }
+    }
+}
+
 #Preview {
     ServerView()
+        .modelContainer(for: [ScanLocation.self, CapturedScan.self], inMemory: true)
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Spaces section") {
+    // Empty in a preview: no spaces, and the default as stored.
+    NavigationStack {
+        List { ServerSpacesSection(locations: []) }
+            .scrollContentBackground(.hidden)
+            .background(Color.black)
+    }
+    .preferredColorScheme(.dark)
+}
+
+#Preview("Choose spaces") {
+    NavigationStack { SpacesSyncList() }
         .modelContainer(for: [ScanLocation.self, CapturedScan.self], inMemory: true)
         .preferredColorScheme(.dark)
 }

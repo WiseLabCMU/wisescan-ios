@@ -388,6 +388,21 @@ final class BundleSync {
         buildStop?.stop()
     }
 
+    /// These scans' spaces were turned off (`ControlPlaneSync.setSyncing`): a bundle of one under way
+    /// stops, and what the server said of them is dropped, so nothing starts one again before the
+    /// next sync (which no longer reports them).
+    func stopSending(_ scanIds: Set<UUID>) {
+        guard !scanIds.isEmpty else { return }
+        if let active, scanIds.contains(active.scanId) {
+            if active.task != nil { cancelUpload() } else { buildStop?.stop() }
+        }
+        let kept = remote.filter { !scanIds.contains($0.key) }
+        if kept.count != remote.count {
+            remote = kept
+            storeRemote()
+        }
+    }
+
     /// The control plane is another server: its own state starts afresh. The checklist's choices
     /// stay (they are the user's, not the server's), and so do built bundles (their content is
     /// the same whichever server takes them).
