@@ -235,6 +235,19 @@ struct CaptureView: View {
         }
     }
 
+    /// Automatic 360° stills (`FrameCaptureSession.rigAutoStillTrigger`): the 360° trigger for the
+    /// spot the rig is holding still at, or nil when it doesn't get one: switched off in Developer
+    /// Mode, the camera busy or lost, or within `stillSpacingTargetMeters` of an earlier 360° still
+    /// (the floor rings' test, on the same phone positions as the spacing chip).
+    func automaticRigStill(at phonePose: simd_float4x4) -> (() -> Void)? {
+        guard UserDefaults.standard.bool(forKey: AppConstants.Key.rigAutoStills),
+              isRecording, thetaManager.isConnected, !thetaManager.isCapturing,
+              !thetaManager.cameraUnresponsive else { return nil }
+        let here = SIMD3<Float>(phonePose.columns.3.x, phonePose.columns.3.y, phonePose.columns.3.z)
+        guard StillSpacingRings.spacing(at: here, points: thetaManager.scanStillPositions).isGood else { return nil }
+        return { captureThetaStill() }
+    }
+
     /// Rig-geometry state line for the 360° source chip. Post-pivot the profile is only
     /// the per-scan Process solve's warm prior, so the chip reports STATE (prior ready /
     /// other camera / none) — not residual-colored quality: absolute px thresholds went
@@ -282,7 +295,9 @@ struct CaptureView: View {
         case .tooClose(let distance):
             return Text(String(format: " · %.1f m from last — move on", distance))
         case .good:
-            return Text(" · ") + Text(Image(systemName: "checkmark.circle.fill")).foregroundColor(.green) + Text(" on spot")
+            // With automatic 360° stills on, holding still here takes one.
+            let hint = UserDefaults.standard.bool(forKey: AppConstants.Key.rigAutoStills) ? " on spot · hold still" : " on spot"
+            return Text(" · ") + Text(Image(systemName: "checkmark.circle.fill")).foregroundColor(.green) + Text(hint)
         }
     }
 

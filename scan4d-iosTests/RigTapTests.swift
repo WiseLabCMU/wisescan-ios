@@ -35,3 +35,41 @@ final class RigTapTests: XCTestCase {
         XCTAssertFalse(session.isStillCapturePending)
     }
 }
+
+/// When the rig asks for an automatic 360° still: a deliberate pause on the rig, after the warm-up,
+/// with nothing armed and nothing taken in this pause. Spacing, the camera and the switch are the
+/// capture view's call (`CaptureView.automaticRigStill`).
+@MainActor
+final class RigAutoStillTests: XCTestCase {
+    private let hold = AppConstants.stillnessDurationRequired + AppConstants.rigAutoStillHoldSeconds
+    private let afterWarmup = AppConstants.roomStillWarmupSeconds + 1
+
+    private func due(confirmedStill: Bool = true, isRig: Bool = true, requestArmed: Bool = false,
+                     pauseDelivered: Bool = false, heldFor: TimeInterval? = nil,
+                     sinceRecordingStart: TimeInterval? = nil) -> Bool {
+        FrameCaptureSession.rigAutoStillDue(confirmedStill: confirmedStill, isRig: isRig,
+                                            requestArmed: requestArmed, pauseDelivered: pauseDelivered,
+                                            heldFor: heldFor ?? hold, sinceRecordingStart: sinceRecordingStart ?? afterWarmup)
+    }
+
+    func testDueAfterADeliberatePauseOnTheRig() {
+        XCTAssertTrue(due())
+        XCTAssertFalse(due(heldFor: hold - 0.1), "a brief stop is not a pause")
+    }
+
+    func testNotDueOffTheRigOrWhileMoving() {
+        XCTAssertFalse(due(isRig: false))
+        XCTAssertFalse(due(confirmedStill: false))
+    }
+
+    func testOnePerPauseAndNeverOverATap() {
+        XCTAssertFalse(due(pauseDelivered: true), "this pause already gave its still")
+        XCTAssertFalse(due(requestArmed: true), "a tap (or an earlier automatic request) is armed")
+    }
+
+    func testNotDuringTheWarmup() {
+        XCTAssertFalse(due(sinceRecordingStart: AppConstants.roomStillWarmupSeconds - 1))
+        XCTAssertFalse(FrameCaptureSession.rigAutoStillDue(confirmedStill: true, isRig: true, requestArmed: false,
+                                                           pauseDelivered: false, heldFor: hold, sinceRecordingStart: nil))
+    }
+}

@@ -87,6 +87,7 @@ enum AppConstants {
         static let keyframeWeightBonus = "keyframeWeightBonus"        // Developer Mode: keyframe weight bonus in colorization (A/B vs equal still/sweep weighting)
         static let robustColorMedian = "robustColorMedian"            // Developer Mode: consensus vector-median color reduce (A/B vs legacy per-channel median)
         static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
+        static let rigAutoStills = "rigAutoStills"                    // Developer Mode: off = the 360° rig fires only on a tap (no automatic 360° stills)
         static let thetaBLESerial = "thetaBLESerial"                  // 8-digit serial of the paired camera (BLE identity + factory password)
         static let thetaBLEPeripheralID = "thetaBLEPeripheralID"      // CBPeripheral identifier for scan-free reconnects
         static let thetaBLEModel = "thetaBLEModel"                    // model of the active camera, for link-time decisions (Z1 rides the v1 auth family; X rides bonded CCv2)
@@ -161,6 +162,7 @@ enum AppConstants {
         // 360° and colorize probes
         Key.colorizeFrom360Faces: colorizeFrom360Faces,
         Key.keepCameraOriginals: keepCameraOriginals,
+        Key.rigAutoStills: rigAutoStills,
         Key.privacyFilterTimeLimitHours: privacyFilterTimeLimitHours,
         Key.gpuColorize: gpuColorize,
         Key.keyframeWeightBonus: keyframeWeightBonus,
@@ -309,6 +311,10 @@ enum AppConstants {
     /// bystanders in every direction, and the camera (open AP, factory password = serial
     /// digits, unauthenticated OSC API) is the weakest place to leave them.
     static let keepCameraOriginals: Bool = false
+    /// Automatic 360° stills on the rig (default ON): a 360° still with its phone still fires
+    /// whenever the rig has held still `rigAutoStillHoldSeconds` past confirmation at a spot
+    /// `stillSpacingTargetMeters` from every earlier one. The tap still adds one anywhere.
+    static let rigAutoStills: Bool = true
     /// Developer Mode A/B toggle for the GPU vertex-color projection path (default ON —
     /// production uses the GPU). OFF forces the CPU reference implementation so a suspected
     /// GPU-path artifact (occlusion bleed-through, mask misses) can be isolated on the SAME
@@ -588,6 +594,7 @@ enum AppConstants {
     static let stillnessAngularThreshold: Float = 0.1          // rad/s — rotational velocity below this = "still"
     static let stillnessDurationRequired: TimeInterval = 0.3   // seconds device must be still before counting as "sharp" capture
     static let tapSettleTimeoutSeconds: TimeInterval = 8       // a rig tap waits this long for the device to settle after the tap's own wobble, then is dropped (warning haptic + message)
+    static let rigAutoStillHoldSeconds: TimeInterval = 1       // an automatic 360° still fires once the rig has stayed still this long past confirmation: a deliberate pause, not a brief stop (each costs ~5 s of camera time). Tune from [RigAuto] logs
     static let hiResCaptureTimeoutSeconds: TimeInterval = 5.0  // watchdog: re-request if a hi-res completion never arrives
     static let hiResMaxFailures: Int = 3                       // consecutive hi-res failures before latching stream-frame fallback
     static let keyframeSharpnessFloor: Float = 20.0            // Laplacian variance below this = grossly blurred still → retry (conservative: plain walls still pass on sensor noise)

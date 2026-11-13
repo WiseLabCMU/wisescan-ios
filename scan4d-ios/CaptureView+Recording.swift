@@ -264,6 +264,9 @@ extension CaptureView {
                 mockCameraImages: developerMode && mockCameraImages,
                 mockDepthMaps: developerMode && mockDepthMaps
             )
+            // Automatic 360° stills on the rig: the session asks at each held pause, this view
+            // decides on the spot. Cleared by the session when recording ends.
+            frameCaptureSession.rigAutoStillTrigger = { pose in automaticRigStill(at: pose) }
         }
 
         // Start a timer to track recording duration
