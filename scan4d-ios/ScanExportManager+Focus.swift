@@ -125,11 +125,11 @@ extension ScanExportManager {
     }
 }
 
-/// Person check for one focus still (12MP, sensor landscape). Vision runs on a small upright copy:
-/// the capture view is portrait-locked, so people stand along the sensor image's width, and the
-/// model is trained on upright people. The mask comes back to the sensor's orientation for the blur.
-/// Same model policy as `EquirectPrivacyBlur` (it reuses its per-image `personMask`): Vision's
-/// answer stands, any person pixel means blur.
+/// Person check for one focus still (12MP, sensor landscape). `PersonCheck` runs on an upright
+/// copy: the capture view is portrait-locked, so people stand along the sensor image's width, and
+/// the models are trained on upright people. The mask comes back to the sensor's orientation for
+/// the blur. Same policy as `EquirectPrivacyBlur`: whatever Vision finds stands, any person pixel
+/// means blur.
 enum FocusStillPrivacy {
 
     enum Outcome {
@@ -155,10 +155,21 @@ enum FocusStillPrivacy {
         }
     }
 
+    /// The person check's settings (`PersonCheck`): Vision's person segmentation over the whole
+    /// photo and on overlapping tiles, plus body and face boxes.
+    static var personCheckSettings: PersonCheck.Settings {
+        PersonCheck.Settings(tileColumns: AppConstants.personCheckTileColumns,
+                             tileRows: AppConstants.personCheckTileRows,
+                             tileOverlap: AppConstants.personCheckTileOverlap,
+                             maskThreshold: EquirectPrivacyBlur.maskThreshold,
+                             boxPadding: AppConstants.personCheckBoxPadding)
+    }
+
     /// The person mask of a sensor-landscape still in sensor orientation (8-bit gray, people
-    /// white), or nil when Vision finds no person. Vision runs on a small upright copy (see the
-    /// type's note). Shared with the masks a room scan gets when the Privacy Filter is applied
-    /// after capture (`PrivacyFilterReapply`), whose frames come from the same portrait capture.
+    /// white), or nil when the person check (`PersonCheck`) finds no one. It runs on an upright
+    /// copy (see the type's note). Shared with the masks a room scan gets when the Privacy Filter
+    /// is applied after capture (`PrivacyFilterReapply`), whose frames come from the same
+    /// portrait capture.
     static func sensorPersonMask(jpeg data: Data) -> Result<CGImage?, EquirectPrivacyBlur.StringError> {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             return .failure(.init("decode failed"))
@@ -176,12 +187,14 @@ enum FocusStillPrivacy {
         guard let uprightImage = context.createCGImage(upright, from: upright.extent) else {
             return .failure(.init("upright render failed"))
         }
-        switch EquirectPrivacyBlur.personMask(for: uprightImage) {
-        case .failure(let error):
-            return .failure(error)
+        switch PersonCheck.mask(upright: uprightImage, settings: personCheckSettings) {
+        case .failure(let failure):
+            return .failure(.init(failure.message))
         case .success(nil):
             return .success(nil)
-        case .success(let mask?):
+        case .success(let found?):
+            PerfDiag.log("[Privacy] person check: \(found.summary)")
+            let mask = EquirectPrivacyBlur.FaceMask(bytes: found.bytes, width: found.width, height: found.height, hasPerson: true)
             guard let sensorMask = sensorOrientationMask(mask) else { return .failure(.init("mask rotation failed")) }
             return .success(sensorMask)
         }

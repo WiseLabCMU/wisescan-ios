@@ -112,23 +112,50 @@ final class PrivacyFilterReapplyTests: XCTestCase {
         XCTAssertEqual(PrivacyFilterReapply.framesNeedingMasks(rawData: raw), ["frame_00000"])
     }
 
-    func testFramesThatAlreadyHaveMasksAreLeftAlone() throws {
+    /// A run cut short: masks from the current check stay, the rest are made.
+    func testMasksFromTheCurrentCheckAreLeftAlone() throws {
         for stem in ["frame_00000", "frame_00001", "frame_00002"] { try writeFrame(stem) }
         try writeJSON(["privacy_filter": false], to: raw.appendingPathComponent("scan4d_metadata.json"))
         XCTAssertTrue(PrivacyFilterReapply.markRoomMetadata(rawData: raw, scanDirectory: root, at: Date()))
+        PrivacyFilterReapply.updateRoomMetadata(rawData: raw, scanDirectory: root) {
+            $0[PrivacyFilterReapply.masksVersionKey] = PrivacyFilterReapply.masksVersion
+        }
         let masks = raw.appendingPathComponent("masks")
         try FileManager.default.createDirectory(at: masks, withIntermediateDirectories: true)
         let existing = try XCTUnwrap(PrivacyFilterReapply.filledMask(0))
         try existing.write(to: masks.appendingPathComponent("frame_00001.png"))
 
         XCTAssertEqual(PrivacyFilterReapply.framesNeedingMasks(rawData: raw), ["frame_00000", "frame_00002"])
-        XCTAssertEqual(PrivacyFilterReapply.generateMasks(rawData: raw), 2)
+        XCTAssertEqual(PrivacyFilterReapply.generateMasks(rawData: raw, scanDirectory: root), 2)
         XCTAssertFalse(PrivacyFilterReapply.masksPending(rawData: raw), "the step is done once every photo has a mask")
-        XCTAssertEqual(try Data(contentsOf: masks.appendingPathComponent("frame_00001.png")), existing,
-                       "a capture-time mask is never replaced")
+        XCTAssertEqual(try Data(contentsOf: masks.appendingPathComponent("frame_00001.png")), existing)
         for stem in ["frame_00000", "frame_00002"] {
             let png = try Data(contentsOf: masks.appendingPathComponent("\(stem).png"))
             XCTAssertEqual(try maskPixels(png).bitsPerPixel, 8, "8-bit gray, as capture writes")
+        }
+    }
+
+    /// Masks from the first check (no version recorded) missed people in the background: every
+    /// photo gets a new one, and the version is recorded in both metadata copies.
+    func testMasksFromAnOlderCheckAreMadeAgain() throws {
+        for stem in ["frame_00000", "frame_00001"] { try writeFrame(stem) }
+        try writeJSON(["privacy_filter": false], to: raw.appendingPathComponent("scan4d_metadata.json"))
+        try writeJSON(["privacy_filter": false], to: root.appendingPathComponent("scan4d_metadata.json"))
+        XCTAssertTrue(PrivacyFilterReapply.markRoomMetadata(rawData: raw, scanDirectory: root, at: Date()))
+        let masks = raw.appendingPathComponent("masks")
+        try FileManager.default.createDirectory(at: masks, withIntermediateDirectories: true)
+        // A 1x1 stand-in no check writes, so a remade mask is told apart by its size.
+        let old = try XCTUnwrap(PrivacyFilterReapply.filledMask(0, width: 1, height: 1))
+        for stem in ["frame_00000", "frame_00001"] { try old.write(to: masks.appendingPathComponent("\(stem).png")) }
+
+        XCTAssertEqual(PrivacyFilterReapply.framesNeedingMasks(rawData: raw), ["frame_00000", "frame_00001"])
+        XCTAssertEqual(PrivacyFilterReapply.generateMasks(rawData: raw, scanDirectory: root), 2)
+        XCTAssertFalse(PrivacyFilterReapply.masksPending(rawData: raw))
+        for stem in ["frame_00000", "frame_00001"] {
+            XCTAssertNotEqual(try Data(contentsOf: masks.appendingPathComponent("\(stem).png")), old)
+        }
+        for url in [raw.appendingPathComponent("scan4d_metadata.json"), root.appendingPathComponent("scan4d_metadata.json")] {
+            XCTAssertEqual(try readJSON(url)[PrivacyFilterReapply.masksVersionKey] as? Int, PrivacyFilterReapply.masksVersion)
         }
     }
 

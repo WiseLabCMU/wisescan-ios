@@ -136,6 +136,7 @@ scan4d-ios/
 ├── FocusScanStorage.swift       # Filing a capture as a focus scan; card thumbnail
 ├── FocusScanViews.swift         # Focus-scan photo grid
 ├── ScanExportManager+Focus.swift # Focus-scan export zip + fail-closed person check
+├── PersonCheck.swift            # Finding people for the privacy blur: whole-photo and tiled segmentation, body and face boxes
 │  # 360° still source (Ricoh Theta rig)
 ├── ThetaCameraManager.swift     # 360° camera: connect, roster, shutter, still downloads
 ├── ThetaCameraManager+OSC.swift # OSC (Open Spherical Camera) Web API v2.1 transport

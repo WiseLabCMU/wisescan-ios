@@ -50,9 +50,10 @@ Person-shaped geometry is also excluded from the exported mesh, and a live on-sc
 
 A focus scan (photos of one region) captures full-resolution stills without running ARKit's person
 segmentation during capture. When Privacy Filtering is enabled, every still receives a person check
-at export time instead: Vision's person segmentation runs on an upright copy of the still, detected
-person regions are pixelated on the full-resolution image, and the same regions are zeroed in its
-depth map. The check fails closed: a still that cannot be verified or blurred is left out of the
+at export time instead, on an upright copy of the still: Vision's person segmentation over the whole
+still and again on overlapping tiles (so a person in the background, small in the frame, is found
+too), plus Vision's body and face detectors. Every region any of them finds is pixelated on the
+full-resolution image, and the same regions are zeroed in its depth map. The check fails closed: a still that cannot be verified or blurred is left out of the
 export (with its depth and confidence), and the export lists it in `privacy_excluded.json`. A still
 with no person detected ships unchanged. Because nothing is filtered while capturing, the toggle stays
 live during a focus scan, and the scan records it as it stands when the scan stops (a change made
@@ -60,7 +61,7 @@ mid-capture is noted in its `events.log`).
 
 ### Applying the filter after capture
 
-A scan captured with Privacy Filtering off can have the filter applied later: from a room scan's card (**Apply Privacy Filter**, in the long-press menu of its Color button), from the Server tab (**Blur All**, for every scan reported to the server that was captured with it off), or with **Blur, Then Send** when confirming an upload. The app then treats the scan exactly as if it had been captured with the filter on. For a room scan it runs Vision's person segmentation on each saved photo (on an upright copy, as for focus-scan photos) and saves the person masks capture would have saved; a photo it can't check is masked whole. Exports and sync bundles then pixelate people in the photos and zero them in depth maps, the mesh is recolored so no person's appearance is in its colors, and the scan's upload waits until this is done. Focus-scan photos, 360° stills and glasses frames are already checked at export once the filter is on. The scan's metadata records `privacy_filter: true` and when it was applied (`privacy_filter_applied_after_capture`). If the scan already reached a Scan4D server, the phone sends it again, blurred, replacing the server's copy; anything already shared to another app is out of the app's reach. The original photos stay on the device, as for every scan, and applying the filter can't be undone.
+A scan captured with Privacy Filtering off can have the filter applied later: from a room scan's card (**Apply Privacy Filter**, in the long-press menu of its Color button), from the Server tab (**Blur All**, for every scan reported to the server that was captured with it off), or with **Blur, Then Send** when confirming an upload. The app then treats the scan exactly as if it had been captured with the filter on. For a room scan it runs the person check focus-scan photos get (above) on each saved photo and saves the person masks capture would have saved; a photo it can't check is masked whole. Masks made by an earlier version of the check are made again (the metadata records `privacy_masks_version`). Exports and sync bundles then pixelate people in the photos and zero them in depth maps, the mesh is recolored so no person's appearance is in its colors, and the scan's upload waits until this is done. Focus-scan photos, 360° stills and glasses frames are already checked at export once the filter is on. The scan's metadata records `privacy_filter: true` and when it was applied (`privacy_filter_applied_after_capture`). If the scan already reached a Scan4D server, the phone sends it again, blurred, replacing the server's copy; anything already shared to another app is out of the app's reach. The original photos stay on the device, as for every scan, and applying the filter can't be undone.
 
 ### 360° Camera Stills
 

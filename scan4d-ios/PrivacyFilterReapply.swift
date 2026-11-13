@@ -11,8 +11,9 @@ import UniformTypeIdentifiers
 /// A room scan gets what capture would have written with the filter on, so the existing export,
 /// colorize and sync paths treat it exactly like one captured filtered:
 /// - `privacy_filter: true` in its metadata, plus `privacy_filter_applied_after_capture` (when);
-/// - a person mask for every photo that has none (`ScanPostprocessor.Step.privacyMasks`, run like
-///   any Process step, before colorize, and holding the scan's upload until it is done);
+/// - a person mask for every photo that has none, from the person check focus stills get
+///   (`PersonCheck`; `ScanPostprocessor.Step.privacyMasks`, run like any Process step, before
+///   colorize, and holding the scan's upload until it is done);
 /// - a recolor, since its mesh colors were sampled with people in view.
 /// A focus scan only needs the flag (`setup.privacyFilter` in its manifest): its export already
 /// checks every still with Vision. 360° stills and glasses frames are likewise checked at export.
@@ -25,6 +26,12 @@ enum PrivacyFilterReapply {
     /// is what makes missing masks a pending step: scans captured with the filter on also lack
     /// masks for their first frames (the stencil warms up), and those keep the export's fallback.
     static let appliedAfterCaptureKey = "privacy_filter_applied_after_capture"
+
+    /// Metadata key for the person check the generated masks came from, and its current
+    /// version. Masks from an older check are made again: 1 was Vision's person segmentation
+    /// over the whole photo only, which missed people in the background; 2 is `PersonCheck`.
+    static let masksVersionKey = "privacy_masks_version"
+    static let masksVersion = 2
 
     // MARK: Which scans
 
@@ -94,13 +101,22 @@ enum PrivacyFilterReapply {
     /// top level when there is one), keeping every other key. False when there is none to update.
     static func markRoomMetadata(rawData: URL, scanDirectory: URL, at date: Date) -> Bool {
         let stamp = ISO8601DateFormatter().string(from: date)
+        return updateRoomMetadata(rawData: rawData, scanDirectory: scanDirectory) { meta in
+            meta["privacy_filter"] = true
+            meta[appliedAfterCaptureKey] = stamp
+        }
+    }
+
+    /// Applies `change` to a room scan's metadata, both copies, keeping every other key. False
+    /// when there is none to update.
+    @discardableResult
+    static func updateRoomMetadata(rawData: URL, scanDirectory: URL, _ change: (inout [String: Any]) -> Void) -> Bool {
         var updated = false
         for url in [rawData.appendingPathComponent("scan4d_metadata.json"),
                     scanDirectory.appendingPathComponent("scan4d_metadata.json")] {
             guard let data = try? Data(contentsOf: url),
                   var meta = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-            meta["privacy_filter"] = true
-            meta[appliedAfterCaptureKey] = stamp
+            change(&meta)
             guard let out = try? JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]),
                   (try? out.write(to: url, options: .atomic)) != nil else { continue }
             updated = true
@@ -127,18 +143,18 @@ enum PrivacyFilterReapply {
     // MARK: Masks (the Process step)
 
     /// The room scan's photos (`images/frame_*.jpg`) still waiting for a generated mask: the
-    /// filter was applied after capture and the photo has no `masks/frame_*.png`. Empty otherwise.
+    /// filter was applied after capture and the photo has no `masks/frame_*.png`, or the masks
+    /// came from an older person check (every photo then). Empty otherwise.
     static func framesNeedingMasks(rawData: URL) -> [String] {
-        guard let data = try? Data(contentsOf: rawData.appendingPathComponent("scan4d_metadata.json")),
-              let meta = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              meta[appliedAfterCaptureKey] != nil else { return [] }
+        guard let meta = rawMetadata(rawData), meta[appliedAfterCaptureKey] != nil else { return [] }
+        let current = masksAreCurrent(meta)
         let fm = FileManager.default
         let images = (try? fm.contentsOfDirectory(atPath: rawData.appendingPathComponent("images").path)) ?? []
         let masks = Set((try? fm.contentsOfDirectory(atPath: rawData.appendingPathComponent("masks").path)) ?? [])
         return images
             .filter { $0.hasPrefix("frame_") && $0.hasSuffix(".jpg") }
             .map { String($0.dropLast(4)) }
-            .filter { !masks.contains($0 + ".png") }
+            .filter { !current || !masks.contains($0 + ".png") }
             .sorted()
     }
 
@@ -146,16 +162,40 @@ enum PrivacyFilterReapply {
         !framesNeedingMasks(rawData: rawData).isEmpty
     }
 
+    private static func rawMetadata(_ rawData: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: rawData.appendingPathComponent("scan4d_metadata.json")) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Masks recorded as made by the current person check. None recorded: the first check.
+    private static func masksAreCurrent(_ meta: [String: Any]) -> Bool {
+        (meta[masksVersionKey] as? Int ?? 1) >= masksVersion
+    }
+
     /// Writes a mask for every photo waiting for one, in the format capture writes (an 8-bit gray
-    /// PNG, people white, at any size: the export and colorize scale it to the frame). Returns how
-    /// many were written. Runs on Process's queue.
+    /// PNG, people white, at any size: the export and colorize scale it to the frame). Masks from
+    /// an older person check are removed first, and the current version recorded, so a run cut
+    /// short picks up where it stopped. Every mask in such a scan was generated: one captured
+    /// with the filter off has none of its own. Returns how many were written. Runs on Process's
+    /// queue.
     @discardableResult
-    static func generateMasks(rawData: URL, report: ((Int, Int) -> Void)? = nil) -> Int {
-        let frames = framesNeedingMasks(rawData: rawData)
+    static func generateMasks(rawData: URL, scanDirectory: URL, report: ((Int, Int) -> Void)? = nil) -> Int {
+        var frames = framesNeedingMasks(rawData: rawData)
         guard !frames.isEmpty else { return 0 }
+        let fm = FileManager.default
         let imagesDir = rawData.appendingPathComponent("images")
         let masksDir = rawData.appendingPathComponent("masks")
-        try? FileManager.default.createDirectory(at: masksDir, withIntermediateDirectories: true)
+        if let meta = rawMetadata(rawData), !masksAreCurrent(meta) {
+            let stale = ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "png" }
+            stale.forEach { try? fm.removeItem(at: $0) }
+            updateRoomMetadata(rawData: rawData, scanDirectory: scanDirectory) { $0[masksVersionKey] = masksVersion }
+            if !stale.isEmpty {
+                PerfDiag.log("[Privacy] \(stale.count) masks from an older person check removed, made again")
+            }
+            frames = framesNeedingMasks(rawData: rawData)
+        }
+        try? fm.createDirectory(at: masksDir, withIntermediateDirectories: true)
         var written = 0
         var failed = 0
         for (index, stem) in frames.enumerated() {
