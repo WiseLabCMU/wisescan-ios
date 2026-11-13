@@ -4,34 +4,6 @@ import SwiftData
 
 // MARK: - When and how the app syncs with the control plane (scan4d-server README, "Sync")
 
-/// Which spaces start syncing without a tap (Settings → Auto sync). A synced space keeps syncing
-/// in every mode; this only decides which spaces become synced besides the Sync buttons.
-nonisolated enum ControlPlaneAutoSync: String, CaseIterable, Sendable {
-    /// Every space on the phone, the backlog from before it joined too.
-    case all
-    /// Spaces started after the phone joined (its first successful sync).
-    case new
-    /// Only the spaces sent with Sync.
-    case off
-
-    var title: String {
-        switch self {
-        case .all: return "All"
-        case .new: return "New"
-        case .off: return "Off"
-        }
-    }
-
-    /// A space whose first scan is at or after this syncs on its own; nil: none does.
-    func newSince(joinedAt: Date?) -> Date? {
-        switch self {
-        case .all: return .distantPast
-        case .new: return joinedAt
-        case .off: return nil
-        }
-    }
-}
-
 /// Sends the synced spaces' inventory (`ControlPlaneManifest`) to the control plane: on launch and
 /// return to the foreground, a few seconds after SwiftData saves (coalesced), and from Settings.
 /// Then uploads the RoomPlan previews the server answers that it wants, and hands what it says
@@ -64,10 +36,20 @@ final class ControlPlaneSync {
     /// an unmetered network), as of the last sync.
     private(set) var waitingForWiFi = 0
 
-    /// The spaces this phone reports: the ones sent with Sync (a space, or a stitched map in the
-    /// graph view) and those Auto sync picked up (all, or the ones started after the phone joined).
+    /// Selective sync, per space (docs/design/sync-bundle.md, "Which spaces sync"). The spaces this
+    /// phone reports: those turned on (a space's switch, Sync on a stitched map or in the Scans
+    /// tab, Save in the naming prompt) and new spaces the default picked up (`syncNewSpaces`).
     /// The rest stay off the server.
     private(set) var syncedSpaces: Set<UUID> = ControlPlaneSync.storedSpaces(AppConstants.Key.controlPlaneSyncedSpaces)
+    /// Spaces kept on this device: saved with Save on This Device, or turned off. Never reported,
+    /// whatever the default; one that had synced is marked gone on the server, which keeps what it
+    /// has.
+    private(set) var localSpaces: Set<UUID> = ControlPlaneSync.storedSpaces(AppConstants.Key.controlPlaneLocalSpaces)
+    /// Whether a new space syncs unless kept on this device (the Server tab's Sync new spaces).
+    /// Spaces from before the phone joined (its first successful sync) wait for their switch.
+    private(set) var syncNewSpaces: Bool = ControlPlaneSync.syncNewSpacesDefault(
+        stored: UserDefaults.standard.object(forKey: AppConstants.Key.controlPlaneSyncNewSpaces) as? Bool,
+        legacyAutoSync: UserDefaults.standard.string(forKey: AppConstants.Key.legacyControlPlaneAutoSync))
     /// The spaces the last successful sync carried: the server has their JSON (the badge's Map).
     private(set) var confirmedSpaces: Set<UUID> = ControlPlaneSync.storedSpaces(AppConstants.Key.controlPlaneConfirmedSpaces)
 
@@ -97,10 +79,6 @@ final class ControlPlaneSync {
         guard let server = ControlPlaneClient.baseURL(fromHost: host)?.absoluteString else { return false }
         let stored = UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneStateServer)
         return stored == nil || stored == server
-    }
-    var autoSync: ControlPlaneAutoSync {
-        ControlPlaneAutoSync(rawValue: UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneAutoSync)
-                             ?? AppConstants.controlPlaneAutoSync) ?? .new
     }
     /// The first successful sync: a space whose first scan comes after it is new.
     var joinedAt: Date? {
@@ -173,8 +151,8 @@ final class ControlPlaneSync {
         let context = container.mainContext
         let allLocations = (try? context.fetch(FetchDescriptor<ScanLocation>())) ?? []
         let allLinks = (try? context.fetch(FetchDescriptor<StitchLink>())) ?? []
-        let locations = Self.spacesToReport(allLocations, synced: syncedSpaces,
-                                            newSince: autoSync.newSince(joinedAt: joinedAt))
+        let locations = Self.spacesToReport(allLocations, synced: syncedSpaces, local: localSpaces,
+                                            newSince: syncNewSpaces ? joinedAt : nil)
         let reported = Set(locations.map(\.id))
         if !reported.isSubset(of: syncedSpaces) {
             setSyncedSpaces(syncedSpaces.union(reported))   // a new space, once reported, stays synced
@@ -317,12 +295,55 @@ final class ControlPlaneSync {
         case notSynced, partlySynced, syncing, synced, failed
     }
 
-    /// Sync on a space or a stitched map: from now on these spaces are
-    /// reported (rescans, focus scans and stitches with them), and a sync runs at once.
+    /// Sync on a stitched map or on spaces selected in the Scans tab: these spaces are turned on
+    /// (rescans, focus scans and stitches go with them), and a sync runs at once.
     func sync(spaces ids: [UUID]) {
-        let all = syncedSpaces.union(ids)
-        if all != syncedSpaces { setSyncedSpaces(all) }
+        setSyncing(ids, true)
+    }
+
+    /// A space's switch (its screen, or the Server tab's list), and the naming prompt's choice for
+    /// a new one. On: reported from now on. Off: kept on this device; it stops being reported, so
+    /// the server marks it gone and keeps what it has (there is no server-side removal yet), and a
+    /// bundle of it under way stops.
+    func setSyncing(_ ids: [UUID], _ on: Bool) {
+        let spaces = Set(ids)
+        if on {
+            setSyncedSpaces(syncedSpaces.union(spaces))
+            setLocalSpaces(localSpaces.subtracting(spaces))
+        } else {
+            setSyncedSpaces(syncedSpaces.subtracting(spaces))
+            setLocalSpaces(localSpaces.union(spaces))
+            let locations = (try? container?.mainContext.fetch(FetchDescriptor<ScanLocation>())) ?? []
+            let scanIds: [UUID] = locations.filter { spaces.contains($0.id) }.flatMap { $0.scans }.map { $0.id }
+            BundleSync.shared.stopSending(Set(scanIds))
+        }
         requestSync(after: .zero)
+    }
+
+    /// The Server tab's Sync new spaces.
+    func setSyncNewSpaces(_ on: Bool) {
+        guard on != syncNewSpaces else { return }
+        syncNewSpaces = on
+        UserDefaults.standard.set(on, forKey: AppConstants.Key.controlPlaneSyncNewSpaces)
+        requestSync(after: .seconds(1))
+    }
+
+    /// Whether the space syncs: turned on, or new (since the phone joined) with the default on,
+    /// and not kept on this device. What its switch shows.
+    func syncs(_ location: ScanLocation) -> Bool {
+        let id: UUID = location.id
+        if localSpaces.contains(id) { return false }
+        if syncedSpaces.contains(id) { return true }
+        guard syncNewSpaces, let joinedAt, let first = location.scans.map(\.capturedAt).min() else { return false }
+        return first >= joinedAt
+    }
+
+    /// Sync new spaces' value: as stored, else carried over from the earlier Auto sync (whose
+    /// Off was the one mode that kept new spaces back), else the default.
+    nonisolated static func syncNewSpacesDefault(stored: Bool?, legacyAutoSync: String?) -> Bool {
+        if let stored { return stored }
+        if let legacyAutoSync { return legacyAutoSync != "off" }
+        return AppConstants.controlPlaneSyncNewSpaces
     }
 
     func state(of spaces: [UUID]) -> SpaceState {
@@ -336,11 +357,14 @@ final class ControlPlaneSync {
         }
     }
 
-    /// The spaces a sync reports: the synced ones, and with `newSince` those whose first scan
-    /// came after it (they join the synced set once reported).
-    static func spacesToReport(_ locations: [ScanLocation], synced: Set<UUID>, newSince: Date?) -> [ScanLocation] {
+    /// The spaces a sync reports: the synced ones, and with `newSince` those whose first scan came
+    /// after it (they join the synced set once reported). Never one kept on this device.
+    static func spacesToReport(_ locations: [ScanLocation], synced: Set<UUID>, local: Set<UUID>,
+                               newSince: Date?) -> [ScanLocation] {
         locations.filter { location in
-            if synced.contains(location.id) { return true }
+            let id: UUID = location.id
+            if local.contains(id) { return false }
+            if synced.contains(id) { return true }
             guard let newSince, let first = location.scans.map(\.capturedAt).min() else { return false }
             return first >= newSince
         }
@@ -355,8 +379,15 @@ final class ControlPlaneSync {
     }
 
     private func setSyncedSpaces(_ ids: Set<UUID>) {
+        guard ids != syncedSpaces else { return }
         syncedSpaces = ids
         UserDefaults.standard.set(ids.map(\.uuidString), forKey: AppConstants.Key.controlPlaneSyncedSpaces)
+    }
+
+    private func setLocalSpaces(_ ids: Set<UUID>) {
+        guard ids != localSpaces else { return }
+        localSpaces = ids
+        UserDefaults.standard.set(ids.map(\.uuidString), forKey: AppConstants.Key.controlPlaneLocalSpaces)
     }
 
     nonisolated private static func storedSpaces(_ key: String) -> Set<UUID> {

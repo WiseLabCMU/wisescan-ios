@@ -98,10 +98,10 @@ struct UserGuideView: View {
                               "it sends the format you pick to another app or device: Files, AirDrop, " +
                               "Mail. The screen stays on while a scan is being converted. Sync keeps your " +
                               "Scan4D server up to date with everything in the spaces you sync. Set the " +
-                              "server in the Server tab, then tap Sync to Scan4D Server in a space, " +
-                              "or Sync on a stitched map in the graph view; the Server tab's Auto sync adds every " +
-                              "space (All), the ones you start after joining (New, the default) or none " +
-                              "(Off). The server gets each space's map first: names, times, poses, links " +
+                              "server in the Server tab. A new space syncs when you Save it; Save on This " +
+                              "Device keeps a test off the server (the Server tab's Sync new spaces sets which " +
+                              "is the default). Any space's Sync to Scan4D Server switch turns it on or off, " +
+                              "and so does the Server tab's list of spaces. The server gets each space's map first: names, times, poses, links " +
                               "and room layouts. Then each processed scan goes up as one bundle, photos " +
                               "included, with people blurred when the Privacy Filter is on. A bundle keeps " +
                               "going if you lock the screen or switch apps. Bundles wait for Wi-Fi unless " +

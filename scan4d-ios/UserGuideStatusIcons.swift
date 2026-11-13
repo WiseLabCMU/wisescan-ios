@@ -21,8 +21,8 @@ struct StatusIconsGuideSections: View {
         Section {
             syncBadgeRow(.off, title: "No Cloud Badge",
                          text: "This location isn't synced with a Scan4D server: none is set in the Server " +
-                               "tab, or the location hasn't been synced yet. Tap Sync to Scan4D Server in it, " +
-                               "or let the Server tab's Auto sync add it.")
+                               "tab, or the location is kept on this device (saved with Save on This Device, " +
+                               "or turned off). Turn on Sync to Scan4D Server in it, or in the Server tab's Spaces.")
             syncBadgeRow(.map, title: "Outline Cloud: The Map",
                          text: "The Scan4D server has this location's map: names, times, poses, links and the " +
                                "room layout. Some scans' bundles haven't reached it yet. They wait for " +
@@ -81,18 +81,19 @@ struct StatusIconsGuideSections: View {
 
             iconRow(icon: ControlPlaneSync.SpaceState.notSynced.symbol, color: .teal,
                     title: ControlPlaneSync.SpaceState.notSynced.title,
-                    text: "With a Scan4D server (control plane) set in the Server tab, each location has this " +
-                          "button. It adds the location to the ones this phone keeps in sync: its map " +
-                          "goes first, then each processed scan's bundle.")
+                    text: "With a Scan4D server (control plane) set in the Server tab, each location has a " +
+                          "Sync to Scan4D Server switch: on, its map goes first, then each processed scan's " +
+                          "bundle; off, it stays on this device. A stitched map's Sync in the graph view turns " +
+                          "on all its spaces.")
             iconRow(icon: ControlPlaneSync.SpaceState.synced.symbol, color: .teal,
                     title: ControlPlaneSync.SpaceState.synced.title,
-                    text: "The Scan4D server has this space, and new scans in it sync on their own. Tap " +
-                          "to sync right away.")
+                    text: "The Scan4D server has this space, and new scans in it sync on their own. Sync now " +
+                          "is in the Server tab.")
             iconRow(icon: ControlPlaneSync.SpaceState.failed.symbol, color: .teal,
                     title: ControlPlaneSync.SpaceState.failed.title,
                     text: "The last sync did not reach the Scan4D server. The Server tab shows " +
                           "why (a wrong password, a server that can't be reached), so fix that there, " +
-                          "then tap to retry. Bundles wait for Wi-Fi rather than fail.")
+                          "then Sync now there. Bundles wait for Wi-Fi rather than fail.")
         } header: {
             Text("TROUBLESHOOTING: SYNC AND SHARE")
         } footer: {

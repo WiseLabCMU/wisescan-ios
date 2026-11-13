@@ -54,6 +54,31 @@ the field.
 The server's change evaluator reads the feature cloud and coverage grid, so it now waits for
 the bundle, and with it for Wi-Fi. That's accepted.
 
+## Which spaces sync
+
+*(Added 2026-11-13, after field use: throwaway test scans were syncing.)* Two decisions, in
+order. The first is which **spaces** sync; the second, below, which of their **bundles** go
+(the pending checklist, the Wi-Fi rule, the Privacy Filter hold-back).
+
+The first follows the familiar selective-sync pattern (a cloud drive's "choose folders to
+sync"):
+
+- **Each space has a switch**, Sync to Scan4D Server: on its screen, and in the Server tab's
+  Spaces list (Choose spaces, with Turn All On for a backlog). It replaces the one-way Sync button
+  and Auto sync's All / New / Off, under which a space, once synced, could never stop.
+- **Off keeps a space on this device.** It is never reported, whatever the default. One that had
+  synced is marked gone on the server, which keeps what it has: there is no server-side removal
+  yet. That wants per-user and per-group access first, and the files are easy to clean on the
+  server's file system meanwhile. A bundle of it under way stops.
+- **A new space is decided where its maker knows it is a test**: the naming prompt after a capture.
+  With a server set it has two saves, Save and Save on This Device (or Save and Sync when new
+  spaces don't sync). The map's JSON leaves seconds after a save, so a later choice would come
+  too late for the JSON, though not for the bundle.
+- **Sync new spaces** (the Server tab, on by default) sets which save is the default, and whether
+  a new space no prompt named (a Connect Adjacent space) syncs. It carries over Auto sync: Off
+  stays off. Spaces from before the phone joined wait for their switch.
+- **Sync on a stitched map, or on spaces selected in the Scans tab**, turns them on.
+
 ## The bundle
 
 **Contents: everything.**
@@ -120,7 +145,7 @@ multipart upload comes if failures on large bundles show it is needed.
 - **The pending checklist** lists each scan whose bundle the server lacks, with its space, size
   and state, all selected by default. Deselected scans wait until selected again, and
   deselecting one being sent stops it. New scans join selected. The checklist replaces today's
-  "N waiting for Wi-Fi" count, and with it the worry about Auto sync's All mode flooding the
+  "N waiting for Wi-Fi" count, and with it the worry about flooding the
   server with a backlog. *(Added in review: a scan captured with the Privacy Filter off starts
   deselected, since its photos show people unblurred, and a phone that had Send map packages off
   starts with every scan it held deselected, since bundles carry far more than packages did.)*

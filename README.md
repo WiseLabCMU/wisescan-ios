@@ -49,7 +49,7 @@ Each feature links to its entry in [REQUIREMENTS.md](REQUIREMENTS.md), which has
 ### Share and sync
 
 - **Share:** Send a scan to Files, AirDrop or Mail as a Scan4D bundle or as a mesh file (OBJ, PLY or USDZ). You pick the format each time. ([REQ-007](REQUIREMENTS.md#req-007-share--sync))
-- **Scan4D server sync:** Set a server in the Server tab and the app keeps it up to date with the spaces you choose, sending each processed scan whole in the background. The server can send back join fine-tunes and requests for focus scans. ([REQ-038](REQUIREMENTS.md#req-038-control-plane-sync-device-registry--inventory))
+- **Scan4D server sync:** Set a server in the Server tab and the app keeps it up to date with the spaces you choose (each space has a sync switch, and a new one can be saved with Save on This Device, for a test), sending each processed scan whole in the background. The server can send back join fine-tunes and requests for focus scans. ([REQ-038](REQUIREMENTS.md#req-038-control-plane-sync-device-registry--inventory))
 
 ### Developer
 

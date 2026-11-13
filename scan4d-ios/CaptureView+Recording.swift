@@ -983,6 +983,46 @@ extension CaptureView {
         }
     }
 
+    // MARK: The naming prompt's choices (selective sync; docs/design/sync-bundle.md)
+
+    /// Save's sync choice: nil without a Scan4D server set; else the default for new spaces.
+    var namePromptSyncDefault: Bool? {
+        ControlPlaneSync.shared.client == nil ? nil : ControlPlaneSync.shared.syncNewSpaces
+    }
+
+    /// The other save button, with a server set: Save on This Device (a test, say), or Save and
+    /// Sync when new spaces don't sync.
+    var namePromptAlternative: (title: String, sync: Bool)? {
+        guard let syncs = namePromptSyncDefault else { return nil }
+        return syncs ? ("Save on This Device", false) : ("Save and Sync", true)
+    }
+
+    var namePromptNameIsEmpty: Bool {
+        newLocationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var namePromptMessage: String {
+        let name = "Enter a unique name for this space so you can add scans later."
+        switch namePromptSyncDefault {
+        case true?: return name + " Save sends it to the Scan4D server; Save on This Device keeps it here."
+        case false?: return name + " Save keeps it on this device; Save and Sync sends it to the Scan4D server."
+        case nil: return name
+        }
+    }
+
+    /// The naming prompt's Save buttons: the sync choice is kept for `savePendingScan`, which may
+    /// run later (once the mesh is processed).
+    func saveFromNamePrompt(sync: Bool?) {
+        pendingSyncChoice = sync
+        if isProcessingMesh {
+            isWaitingToSave = true
+            saveMessageIcon = nil
+            saveMessage = "Adding location details..."
+        } else {
+            savePendingScan()
+        }
+    }
+
     func savePendingScan() {
         guard let pending = pendingScan else {
             // Nothing to save — clear any processing/waiting flags so the record button can't stay
@@ -1039,6 +1079,13 @@ extension CaptureView {
 
         PerfDiag.log(String(format: "[Save] saveScan returned in %.0f ms on the main thread (#40)",
                             (CACurrentMediaTime() - saveStart) * 1000))
+
+        // The naming prompt's sync choice becomes the new space's switch (Save on This Device keeps
+        // it off the Scan4D server). A scan added to an existing space follows that space.
+        if pending.locationId == nil, let choice = pendingSyncChoice, let space: UUID = savedScan.location?.id {
+            ControlPlaneSync.shared.setSyncing([space], choice)
+        }
+        pendingSyncChoice = nil
 
         // Write deferred stitching.json now that we have the real target scan ID
         writeStitchingLinkIfPending(targetScanId: savedScan.id)

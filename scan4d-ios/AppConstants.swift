@@ -35,7 +35,9 @@ enum AppConstants {
         static let controlPlaneTaskAnswers = "controlPlaneTaskAnswers" // open/decline answers the server hasn't had yet, sent with the next sync
         static let controlPlaneSyncedSpaces = "controlPlaneSyncedSpaces" // ids of the spaces reported to the control plane (Sync on a space or stitched map)
         static let controlPlaneConfirmedSpaces = "controlPlaneConfirmedSpaces" // ids of the spaces the last successful sync carried (the badge's Map)
-        static let controlPlaneAutoSync = "controlPlaneAutoSync"      // which spaces start syncing without a tap: all / new / off (ControlPlaneAutoSync)
+        static let legacyControlPlaneAutoSync = "controlPlaneAutoSync" // builds before selective sync: Auto sync all / new / off; read once to set Sync new spaces (off stays off)
+        static let controlPlaneSyncNewSpaces = "controlPlaneSyncNewSpaces" // a new space syncs unless saved with Save on This Device (Server tab, Spaces)
+        static let controlPlaneLocalSpaces = "controlPlaneLocalSpaces" // ids of the spaces kept on this device: Save on This Device, or turned off; never reported
         static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
         static let controlPlaneBundlesWifiOnly = "controlPlaneBundlesWifiOnly" // upload scans' data bundles only on Wi-Fi (the JSON and the RoomPlan preview go on any network)
         static let controlPlaneBundlesSkipped = "controlPlaneBundlesSkipped"   // scans deselected in the pending checklist: their bundles wait until selected again
@@ -784,7 +786,7 @@ enum AppConstants {
     static let controlPlaneBundleBusyRetryS: TimeInterval = 60   // a scan Process or Color is working on is tried again this soon
     static let controlPlaneBundleVersionMaxAgeS: TimeInterval = 3_600 // a scan's bundle version is re-read in full at least this often, even when its folders look unchanged
     static let shareWaitForBundleColoringPollS: Double = 0.5     // a Share starting while a sync bundle colors a scan checks this often for it to finish
-    static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
+    static let controlPlaneSyncNewSpaces = true                  // new spaces sync unless kept on this device; spaces from before the phone joined wait for their switch
     static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
     static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
 

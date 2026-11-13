@@ -1,6 +1,6 @@
 # Scan4D Privacy Policy
 
-*Last updated: November 12, 2026*
+*Last updated: November 13, 2026*
 
 ## Data Collection
 
@@ -10,7 +10,7 @@ All scan data (images, depth maps, meshes, and camera poses) is stored locally o
 
 ### Control Plane Sync
 
-If you enter a control plane server in the Server tab, the app keeps that server up to date with the spaces you sync: those you send with Sync to Scan4D Server in a space or Sync on a stitched map, and, depending on the Server tab's Auto sync, every space (All), those you start after the phone joined (New, the default) or none more (Off). Other spaces stay on the phone. Nothing is sent during a scan.
+If you enter a control plane server in the Server tab, the app keeps that server up to date with the spaces you sync. Each space has its own switch, Sync to Scan4D Server, on its screen and in the Server tab's list of spaces. When you save a new space you choose: Save sends it (unless you turned off Sync new spaces in the Server tab), and Save on This Device keeps it here, for a test scan say. A space you turn off is no longer sent, and the server marks it gone; what it already received stays there until removed on the server. Other spaces stay on the phone. Nothing is sent during a scan.
 
 **The map**, on launch and after changes:
 - space and scan names and times;
