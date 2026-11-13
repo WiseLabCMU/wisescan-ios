@@ -50,10 +50,13 @@ Person-shaped geometry is also excluded from the exported mesh, and a live on-sc
 
 A focus scan (photos of one region) captures full-resolution stills without running ARKit's person
 segmentation during capture. When Privacy Filtering is enabled, every still receives a person check
-at export time instead, on an upright copy of the still: Vision's person segmentation over the whole
-still and again on overlapping tiles (so a person in the background, small in the frame, is found
-too), plus Vision's body and face detectors. Every region any of them finds is pixelated on the
-full-resolution image, and the same regions are zeroed in its depth map. The check fails closed: a still that cannot be verified or blurred is left out of the
+at export time instead, on an upright copy of the still: Vision's body and face detectors over the
+whole still and again on overlapping tiles (so a person in the background, small in the frame, is
+found too), plus Vision's person segmentation over the whole still, which outlines a near person
+more closely. Segmentation counts where it touches a detected person: on its own it outlines
+whatever a photo of an empty room is of (on a test focus scan, the plant being scanned, in most
+stills). Every region found is pixelated on the full-resolution image, and the same regions are
+zeroed in its depth map. The check fails closed: a still that cannot be verified or blurred is left out of the
 export (with its depth and confidence), and the export lists it in `privacy_excluded.json`. A still
 with no person detected ships unchanged. Because nothing is filtered while capturing, the toggle stays
 live during a focus scan, and the scan records it as it stands when the scan stops (a change made

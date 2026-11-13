@@ -2,8 +2,9 @@ import CoreGraphics
 import XCTest
 @testable import scan4d_ios
 
-/// The geometry of the person check (`PersonCheck`): its tiles cover the photo with overlap, and
-/// a Vision box (origin bottom-left) lands in the mask (origin top-left), padded and clipped.
+/// The geometry of the person check (`PersonCheck`): its tiles cover the photo with overlap, a
+/// Vision box (origin bottom-left) lands in the mask (origin top-left), padded and clipped, a box
+/// found in a tile lands where the tile is, and segmentation counts only where it touches a box.
 /// What Vision finds is checked against real photos, not here.
 final class PersonCheckTests: XCTestCase {
 
@@ -49,5 +50,50 @@ final class PersonCheckTests: XCTestCase {
         XCTAssertFalse(set(0, 9))
         XCTAssertFalse(set(2, 6))
         XCTAssertFalse(set(2, 0), "nothing at the top")
+    }
+
+    /// A box a detector finds in a tile lands where that tile sits in the photo: the tile is in
+    /// pixels from the top-left, the boxes are normalized from the bottom-left.
+    func testATileBoxLandsWhereTheTileIs() {
+        // The photo's top-right quarter of a 200 x 100 photo.
+        let tile = CGRect(x: 100, y: 0, width: 100, height: 50)
+        let whole = PersonCheck.photoBox(CGRect(x: 0, y: 0, width: 1, height: 1), inTile: tile, width: 200, height: 100)
+        XCTAssertEqual(whole.minX, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(whole.minY, 0.5, accuracy: 1e-9, "the top half, from the bottom")
+        XCTAssertEqual(whole.width, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(whole.height, 0.5, accuracy: 1e-9)
+        // The tile's bottom-left quarter starts at the photo's centre and reaches up and right.
+        let corner = PersonCheck.photoBox(CGRect(x: 0, y: 0, width: 0.5, height: 0.5), inTile: tile, width: 200, height: 100)
+        XCTAssertEqual(corner, CGRect(x: 0.5, y: 0.5, width: 0.25, height: 0.25))
+    }
+
+    /// Segmentation is kept where it touches a box, whole, and dropped where it touches none.
+    func testSegmentationNeedsABox() {
+        // 6 x 3: a region at the left with a box on one of its pixels, and one at the right alone.
+        let width = 6, height = 3
+        let segmentation: [UInt8] = [
+            255, 255, 0, 0, 255, 255,
+            255, 0, 0, 0, 0, 255,
+            0, 0, 0, 0, 0, 0
+        ]
+        var boxes = [UInt8](repeating: 0, count: width * height)
+        boxes[1 * width + 0] = 255
+        let regions = PersonCheck.keepTouching(segmentation, boxes: boxes, width: width, height: height)
+        XCTAssertEqual(regions.keptRegions, 1)
+        XCTAssertEqual(regions.droppedRegions, 1)
+        XCTAssertEqual(regions.droppedPixels, 3)
+        XCTAssertEqual(Array(regions.kept[0..<2]), [255, 255], "the whole touching region is kept")
+        XCTAssertEqual(regions.kept[1 * width + 0], 255)
+        XCTAssertEqual(Array(regions.kept[4..<6]), [0, 0], "the lone region is dropped")
+        XCTAssertEqual(regions.kept[1 * width + 5], 0)
+    }
+
+    /// Regions that touch only diagonally are separate: a box on one keeps only that one.
+    func testDiagonalNeighboursAreSeparateRegions() {
+        let segmentation: [UInt8] = [255, 0, 0, 255]
+        let boxes: [UInt8] = [255, 0, 0, 0]
+        let regions = PersonCheck.keepTouching(segmentation, boxes: boxes, width: 2, height: 2)
+        XCTAssertEqual(regions.kept, [255, 0, 0, 0])
+        XCTAssertEqual(regions.droppedRegions, 1)
     }
 }

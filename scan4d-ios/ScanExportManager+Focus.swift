@@ -126,8 +126,8 @@ extension ScanExportManager {
         PerfDiag.log({
             let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
             let each = stills.isEmpty ? 0 : seconds * 1000 / Double(stills.count)
-            return String(format: "[Privacy] focus privacy pass: %d clean, %d blurred, %d excluded of %d stills in %.1f s (%.0f ms a still)",
-                          clean, blurred, excluded.count, stills.count, seconds, each)
+            return String(format: "[Privacy] focus privacy pass: %d clean, %d blurred, %d excluded of %d stills in %.1f s (%.0f ms a still), ",
+                          clean, blurred, excluded.count, stills.count, seconds, each) + PerfDiag.workConditions
         }())
     }
 }
@@ -135,8 +135,9 @@ extension ScanExportManager {
 /// Person check for one focus still (12MP, sensor landscape). `PersonCheck` runs on an upright
 /// copy: the capture view is portrait-locked, so people stand along the sensor image's width, and
 /// the models are trained on upright people. The mask comes back to the sensor's orientation for
-/// the blur. Same policy as `EquirectPrivacyBlur`: whatever Vision finds stands, any person pixel
-/// means blur.
+/// the blur. Whatever Vision's detectors find stands, and any person pixel means blur; segmentation
+/// counts where it touches what they find (`PersonCheck` says why this differs from
+/// `EquirectPrivacyBlur`).
 enum FocusStillPrivacy {
 
     enum Outcome {
@@ -162,8 +163,8 @@ enum FocusStillPrivacy {
         }
     }
 
-    /// The person check's settings (`PersonCheck`): Vision's person segmentation over the whole
-    /// photo and on overlapping tiles, plus body and face boxes.
+    /// The person check's settings (`PersonCheck`): Vision's body and face detectors over the
+    /// whole photo and on overlapping tiles, plus person segmentation where it touches their boxes.
     static var personCheckSettings: PersonCheck.Settings {
         PersonCheck.Settings(tileColumns: AppConstants.personCheckTileColumns,
                              tileRows: AppConstants.personCheckTileRows,
@@ -197,18 +198,14 @@ enum FocusStillPrivacy {
             return .failure(.init("upright render failed"))
         }
         let prepared = DispatchTime.now().uptimeNanoseconds
-        var timing = PersonCheck.Timing()
-        let result = PersonCheck.mask(upright: uprightImage, settings: personCheckSettings, timing: &timing)
+        var report = PersonCheck.Report()
+        let result = PersonCheck.mask(upright: uprightImage, settings: personCheckSettings, report: &report)
         PerfDiag.log({
             let decodeMs = Double(decoded - started) / 1_000_000, uprightMs = Double(prepared - decoded) / 1_000_000
             let found: String
-            switch result {
-            case .failure(let failure): found = "failed (\(failure.message))"
-            case .success(nil): found = "no person"
-            case .success(let mask?): found = mask.summary
-            }
+            if case .failure(let failure) = result { found = "failed (\(failure.message))" } else { found = report.summary }
             return String(format: "[Privacy] person check %.0f ms (decode %.0f, upright %.0f, whole %.0f, tiles %.0f, combine %.0f): ",
-                          decodeMs + uprightMs + timing.total, decodeMs, uprightMs, timing.whole, timing.tiles, timing.combine) + found
+                          decodeMs + uprightMs + report.total, decodeMs, uprightMs, report.whole, report.tiles, report.combine) + found
         }())
         switch result {
         case .failure(let failure):

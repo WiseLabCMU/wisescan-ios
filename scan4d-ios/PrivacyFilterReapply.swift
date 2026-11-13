@@ -29,9 +29,11 @@ enum PrivacyFilterReapply {
 
     /// Metadata key for the person check the generated masks came from, and its current
     /// version. Masks from an older check are made again: 1 was Vision's person segmentation
-    /// over the whole photo only, which missed people in the background; 2 is `PersonCheck`.
+    /// over the whole photo only, which missed people in the background; 2 added segmentation on
+    /// tiles, which masked things that are not people; 3 is `PersonCheck` with the detectors on
+    /// tiles and segmentation only where it touches their boxes.
     static let masksVersionKey = "privacy_masks_version"
-    static let masksVersion = 2
+    static let masksVersion = 3
 
     // MARK: Which scans
 
@@ -212,8 +214,8 @@ enum PrivacyFilterReapply {
         }
         PerfDiag.log({
             let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
-            return String(format: "[Privacy] masks generated: %d/%d, %d failed closed (whole frame masked), in %.1f s (%.0f ms a photo)",
-                          written, frames.count, failed, seconds, seconds * 1000 / Double(frames.count))
+            return String(format: "[Privacy] masks generated: %d/%d, %d failed closed (whole frame masked), in %.1f s (%.0f ms a photo), ",
+                          written, frames.count, failed, seconds, seconds * 1000 / Double(frames.count)) + PerfDiag.workConditions
         }())
         return written
     }

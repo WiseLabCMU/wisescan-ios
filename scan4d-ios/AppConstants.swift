@@ -674,7 +674,7 @@ enum AppConstants {
     static let focusThumbnailMaxPixel: Int = 640               // card thumbnail: the best still, downsampled during decode
     static let focusThumbnailIdealCoverage: Double = 0.35      // best still = the sharp one whose region share of the frame is nearest this
     static let focusThumbnailJPEGQuality: CGFloat = 0.85
-    static let focusPrivacyWorkingMaxPixel: Int = 2048         // export person check (PersonCheck): Vision runs on a decode this size, whole and in tiles
+    static let focusPrivacyWorkingMaxPixel: Int = 2016         // export person check (PersonCheck): Vision runs on a decode this size, whole and in tiles; half a 4032 px still, so the JPEG decodes at half scale (2048 decoded 2.8x slower on a Mac)
     static let personCheckTileColumns: Int = 2                 // PersonCheck tiles across the upright photo (portrait: 2 x 3)
     static let personCheckTileRows: Int = 3
     static let personCheckTileOverlap: Double = 0.25           // share of a tile overlapping its neighbour, so a person on a seam is whole in one tile

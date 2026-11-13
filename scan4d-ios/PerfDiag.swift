@@ -68,6 +68,30 @@ enum PerfDiag {
         logger.notice("\(m, privacy: .public)")
     }
 
+    /// The device's thermal state and the calling thread's quality of service, as
+    /// "thermal fair, QoS utility": the two things that made the same privacy pass run 3x
+    /// slower on one 2026-11-13 device test than on the next.
+    static var workConditions: String {
+        let thermal: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: thermal = "nominal"
+        case .fair: thermal = "fair"
+        case .serious: thermal = "serious"
+        case .critical: thermal = "critical"
+        @unknown default: thermal = "unknown"
+        }
+        let qos: String
+        switch qos_class_self() {
+        case QOS_CLASS_USER_INTERACTIVE: qos = "userInteractive"
+        case QOS_CLASS_USER_INITIATED: qos = "userInitiated"
+        case QOS_CLASS_DEFAULT: qos = "default"
+        case QOS_CLASS_UTILITY: qos = "utility"
+        case QOS_CLASS_BACKGROUND: qos = "background"
+        default: qos = "unspecified"
+        }
+        return "thermal \(thermal), QoS \(qos)"
+    }
+
     /// Time `body`, emit a signpost interval, and log its duration (always, or only when it
     /// exceeds `warnOverMs`). Use for discrete operations (encodes, GPU/voxel passes).
     @inline(__always)
