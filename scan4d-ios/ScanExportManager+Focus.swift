@@ -81,6 +81,7 @@ extension ScanExportManager {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         var clean = 0, blurred = 0
         var excluded: [String] = []
+        let started = DispatchTime.now().uptimeNanoseconds
         for (index, url) in stills.enumerated() {
             if stop?.isStopped == true { break }
             phase?(.counted("Privacy check", index + 1, of: stills.count))
@@ -122,14 +123,21 @@ extension ScanExportManager {
             try? data.write(to: stagingDir.appendingPathComponent("privacy_excluded.json"))
         }
         focusLog.notice("focus privacy pass: \(clean, privacy: .public) clean, \(blurred, privacy: .public) blurred, \(excluded.count, privacy: .public) excluded of \(stills.count, privacy: .public)")
+        PerfDiag.log({
+            let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
+            let each = stills.isEmpty ? 0 : seconds * 1000 / Double(stills.count)
+            return String(format: "[Privacy] focus privacy pass: %d clean, %d blurred, %d excluded of %d stills in %.1f s (%.0f ms a still), ",
+                          clean, blurred, excluded.count, stills.count, seconds, each) + PerfDiag.workConditions
+        }())
     }
 }
 
-/// Person check for one focus still (12MP, sensor landscape). Vision runs on a small upright copy:
-/// the capture view is portrait-locked, so people stand along the sensor image's width, and the
-/// model is trained on upright people. The mask comes back to the sensor's orientation for the blur.
-/// Same model policy as `EquirectPrivacyBlur` (it reuses its per-image `personMask`): Vision's
-/// answer stands, any person pixel means blur.
+/// Person check for one focus still (12MP, sensor landscape). `PersonCheck` runs on an upright
+/// copy: the capture view is portrait-locked, so people stand along the sensor image's width, and
+/// the models are trained on upright people. The mask comes back to the sensor's orientation for
+/// the blur. Whatever Vision's detectors find stands, and any person pixel means blur; segmentation
+/// counts where it touches what they find (`PersonCheck` says why this differs from
+/// `EquirectPrivacyBlur`).
 enum FocusStillPrivacy {
 
     enum Outcome {
@@ -144,29 +152,70 @@ enum FocusStillPrivacy {
     private static let context = CIContext(options: [.useSoftwareRenderer: false])
 
     static func process(jpeg data: Data) -> Outcome {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return .failed("decode failed") }
+        switch sensorPersonMask(jpeg: data) {
+        case .failure(let error):
+            return .failed(error.message)
+        case .success(nil):
+            return .clean
+        case .success(let sensorMask?):
+            guard let blurred = pixelate(jpeg: data, mask: sensorMask) else { return .failed("blur render failed") }
+            return .blurred(blurred, sensorMask)
+        }
+    }
+
+    /// The person check's settings (`PersonCheck`): Vision's body and face detectors over the
+    /// whole photo and on overlapping tiles, plus person segmentation where it touches their boxes.
+    static var personCheckSettings: PersonCheck.Settings {
+        PersonCheck.Settings(tileColumns: AppConstants.personCheckTileColumns,
+                             tileRows: AppConstants.personCheckTileRows,
+                             tileOverlap: AppConstants.personCheckTileOverlap,
+                             maskThreshold: EquirectPrivacyBlur.maskThreshold,
+                             boxPadding: AppConstants.personCheckBoxPadding)
+    }
+
+    /// The person mask of a sensor-landscape still in sensor orientation (8-bit gray, people
+    /// white), or nil when the person check (`PersonCheck`) finds no one. It runs on an upright
+    /// copy (see the type's note). Shared with the masks a room scan gets when the Privacy Filter
+    /// is applied after capture (`PrivacyFilterReapply`), whose frames come from the same
+    /// portrait capture.
+    static func sensorPersonMask(jpeg data: Data) -> Result<CGImage?, EquirectPrivacyBlur.StringError> {
+        let started = DispatchTime.now().uptimeNanoseconds
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return .failure(.init("decode failed"))
+        }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: AppConstants.focusPrivacyWorkingMaxPixel,
             kCGImageSourceCreateThumbnailWithTransform: false
         ]
         guard let working = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return .failed("working decode failed")
+            return .failure(.init("working decode failed"))
         }
+        let decoded = DispatchTime.now().uptimeNanoseconds
         // Sensor landscape to the portrait the operator held: the capture view's fixed map.
         let upright = CIImage(cgImage: working).oriented(.right)
         guard let uprightImage = context.createCGImage(upright, from: upright.extent) else {
-            return .failed("upright render failed")
+            return .failure(.init("upright render failed"))
         }
-        switch EquirectPrivacyBlur.personMask(for: uprightImage) {
-        case .failure(let error):
-            return .failed(error.message)
+        let prepared = DispatchTime.now().uptimeNanoseconds
+        var report = PersonCheck.Report()
+        let result = PersonCheck.mask(upright: uprightImage, settings: personCheckSettings, report: &report)
+        PerfDiag.log({
+            let decodeMs = Double(decoded - started) / 1_000_000, uprightMs = Double(prepared - decoded) / 1_000_000
+            let found: String
+            if case .failure(let failure) = result { found = "failed (\(failure.message))" } else { found = report.summary }
+            return String(format: "[Privacy] person check %.0f ms (decode %.0f, upright %.0f, whole %.0f, tiles %.0f, combine %.0f): ",
+                          decodeMs + uprightMs + report.total, decodeMs, uprightMs, report.whole, report.tiles, report.combine) + found
+        }())
+        switch result {
+        case .failure(let failure):
+            return .failure(.init(failure.message))
         case .success(nil):
-            return .clean
-        case .success(let mask?):
-            guard let sensorMask = sensorOrientationMask(mask) else { return .failed("mask rotation failed") }
-            guard let blurred = pixelate(jpeg: data, mask: sensorMask) else { return .failed("blur render failed") }
-            return .blurred(blurred, sensorMask)
+            return .success(nil)
+        case .success(let found?):
+            let mask = EquirectPrivacyBlur.FaceMask(bytes: found.bytes, width: found.width, height: found.height, hasPerson: true)
+            guard let sensorMask = sensorOrientationMask(mask) else { return .failure(.init("mask rotation failed")) }
+            return .success(sensorMask)
         }
     }
 

@@ -72,28 +72,60 @@ struct SyncLine: View {
             }
             .font(.caption2)
             .foregroundColor(line.failed ? .yellow : .green.opacity(0.8))
-            .unblurredBundleConsent(isPresented: $confirmUnblurred) { bundles.setSelected(id, true) }
+            .unblurredBundleConsent(isPresented: $confirmUnblurred, scanId: id)
         }
     }
 }
 
 extension View {
-    /// Asks before a scan captured with the Privacy Filter off is selected for sync: its bundle
-    /// carries its photos as captured, people unblurred.
-    /// Always Send remembers the answer: such scans then go like any other, with no question,
-    /// until the Server tab's "Ask before sending unblurred scans" is turned back on.
-    func unblurredBundleConsent(isPresented: Binding<Bool>, send: @escaping () -> Void) -> some View {
-        alert("Send photos with people unblurred?", isPresented: isPresented) {
-            Button("Send", action: send)
-            Button("Always Send") {
-                BundleSync.shared.setHoldsBackFilterOff(false)
-                send()
+    /// Asks once before scans captured with the Privacy Filter off are selected for sync: the one
+    /// tapped and every other such scan waiting (`BundleSync.waitingUnblurred`), so a phone with
+    /// many of them answers one question, not one per scan. Their bundles carry photos as
+    /// captured, people unblurred, unless the user picks Blur, Then Send, which applies the filter
+    /// to them first (`PrivacyFilterReapply`). Always Send Unblurred remembers the answer until the
+    /// Server tab's "Ask before sending unblurred scans" is turned back on.
+    func unblurredBundleConsent(isPresented: Binding<Bool>, scanId: UUID) -> some View {
+        modifier(UnblurredBundleConsent(isPresented: isPresented, scanId: scanId))
+    }
+}
+
+private struct UnblurredBundleConsent: ViewModifier {
+    @Binding var isPresented: Bool
+    let scanId: UUID
+    @Environment(\.modelContext) private var modelContext
+
+    func body(content: Content) -> some View {
+        let bundles = BundleSync.shared
+        let ids = isPresented ? Array(Set(bundles.waitingUnblurred).union([scanId])) : [scanId]
+        let count = ids.count
+        content.alert(count == 1 ? "Send photos with people unblurred?" : "Send \(count) scans with people unblurred?",
+                      isPresented: $isPresented) {
+            Button("Blur, Then Send") { blurThenSend(ids) }
+            Button(count == 1 ? "Send Unblurred" : "Send All \(count) Unblurred") {
+                for id in ids { bundles.setSelected(id, true) }
+            }
+            Button("Always Send Unblurred") {
+                bundles.setHoldsBackFilterOff(false)
+                for id in ids { bundles.setSelected(id, true) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This scan was captured with the Privacy Filter off, so people in its photos aren't blurred. " +
-                 "Its bundle goes to the Scan4D server as captured. Always Send sends every such scan " +
-                 "without asking; turn that back off in the Server tab.")
+            Text((count == 1 ? "This scan was captured with the Privacy Filter off, so people in its photos aren't blurred. "
+                  : "These \(count) scans were captured with the Privacy Filter off, so people in their photos aren't blurred. ")
+                 + "Blur, Then Send applies the filter first: they are processed again on this device, then sent "
+                 + "with people blurred (this can't be undone; the originals stay on this device). Always Send "
+                 + "Unblurred stops asking; turn that back off in the Server tab.")
+        }
+    }
+
+    /// Applies the filter, then selects only the scans it marked: one it couldn't mark (no
+    /// metadata to update) stays held back rather than going unblurred. Each waits for its masks
+    /// and recolor before its bundle is built.
+    private func blurThenSend(_ ids: [UUID]) {
+        let wanted = Set(ids)
+        let scans = ((try? modelContext.fetch(FetchDescriptor<CapturedScan>())) ?? []).filter { wanted.contains($0.id) }
+        for id in PrivacyFilterReapply.apply(to: scans, modelContext: modelContext) {
+            BundleSync.shared.setSelected(id, true)
         }
     }
 }
@@ -212,7 +244,7 @@ private struct PendingBundleRow: View {
                     .buttonStyle(.borderless)
             }
         }
-        .unblurredBundleConsent(isPresented: $confirmUnblurred) { bundles.setSelected(id, true) }
+        .unblurredBundleConsent(isPresented: $confirmUnblurred, scanId: id)
     }
 }
 

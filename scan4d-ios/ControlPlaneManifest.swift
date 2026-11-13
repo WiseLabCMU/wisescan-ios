@@ -323,4 +323,10 @@ enum SettledScans {
         settled.insert(id)
         return true
     }
+
+    /// Asks again next time: the scan has new structural work (the Privacy Filter applied after
+    /// capture), so its bundle mustn't be offered until that is done.
+    static func forget(_ id: UUID) {
+        settled.remove(id)
+    }
 }

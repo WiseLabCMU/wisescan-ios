@@ -55,7 +55,7 @@ enum ScanPostprocessor {
     // MARK: - Steps + per-artifact status
 
     enum Step: String {
-        case equirectDownloads, equirectMasks, equirectCalibration, featureCloud, registration, proxy, colorize
+        case equirectDownloads, privacyMasks, equirectMasks, equirectCalibration, featureCloud, registration, proxy, colorize
     }
 
     /// Find an artifact at the scan dir top level or in raw_data/ — late-arriving sidecars
@@ -150,6 +150,13 @@ enum ScanPostprocessor {
         // pass, and the calibration solve needs them for poses.
         if !pendingEquirectDownloads(rawDataPath: scan.rawDataPath).isEmpty {
             steps.append(.equirectDownloads)
+        }
+
+        // Person masks for a scan the Privacy Filter was applied to after capture
+        // (PrivacyFilterReapply): structural, so the scan's upload waits for them, and ahead of
+        // colorize, which keeps people out of the mesh colors by these masks.
+        if PrivacyFilterReapply.masksPending(rawData: scan.rawDataPath) {
+            steps.append(.privacyMasks)
         }
 
         // Operator/rig masks: one per still, on disk beside it. Generated HERE rather
@@ -654,7 +661,11 @@ enum ScanPostprocessor {
                 DispatchQueue.main.async {
                     if outcome.didStructural || outcome.didColorize {
                         w.scan.postprocessedAt = Date()
-                        if outcome.didColorize { w.scan.isColored = true }
+                        if outcome.didColorize {
+                            w.scan.isColored = true
+                        } else if outcome.masksChanged {
+                            w.scan.isColored = false
+                        }
                         w.scan.location?.updatedAt = Date()
                         try? modelContext.save()
                     }
@@ -671,6 +682,9 @@ enum ScanPostprocessor {
     private struct Outcome {
         var didStructural = false
         var didColorize = false
+        /// Person masks were written (`privacyMasks`): colors sampled before them may hold
+        /// people, so the scan is uncolored unless this pass recolored it.
+        var masksChanged = false
     }
 
     // swiftlint:disable:next function_body_length cyclomatic_complexity
@@ -754,6 +768,17 @@ enum ScanPostprocessor {
             if swept > 0 {
                 log.notice("postprocess \(w.name, privacy: .public): deleted \(swept) transferred still(s) from camera")
             }
+        }
+
+        // ── 0.52 PRIVACY MASKS ── (the Privacy Filter applied after capture). A person mask for
+        // each photo that has none, as capture writes with the filter on; before colorize.
+        if steps.contains(.privacyMasks) {
+            let written = PrivacyFilterReapply.generateMasks(rawData: raw, scanDirectory: dir) { done, total in
+                report("Privacy masks \(done)/\(total)…")
+            }
+            outcome.didStructural = true
+            outcome.masksChanged = written > 0
+            log.notice("postprocess \(w.name, privacy: .public): privacy masks \(written) generated")
         }
 
         // ── 0.55 OPERATOR/RIG MASKS ── (before calibration, which is the point:

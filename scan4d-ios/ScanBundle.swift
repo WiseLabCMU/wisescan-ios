@@ -489,6 +489,26 @@ extension BundleSync {
         holdsBackFilterOff && filterOff.contains(scanId)
     }
 
+    /// Scans the Privacy Filter was just applied to (`PrivacyFilterReapply`): no longer held back
+    /// as captured with it off, and a selection made for them as unblurred is moot. One being
+    /// built or sent unblurred right now stops. The next sync reads them filtered too.
+    func filterApplied(_ scanIds: [UUID]) {
+        let ids = Set(scanIds)
+        filterOff.subtract(ids)
+        chosen.subtract(ids)
+        store(filterOff, AppConstants.Key.controlPlaneBundlesFilterOff)
+        store(chosen, AppConstants.Key.controlPlaneBundlesChosen)
+        if let active, ids.contains(active.scanId) {
+            if active.task != nil { cancelUpload() } else { buildStop?.stop() }
+        }
+    }
+
+    /// Scans waiting to upload that are held back as captured with the Privacy Filter off: the
+    /// server wants them and the user hasn't selected them. One confirmation covers them all.
+    var waitingUnblurred: [UUID] {
+        remote.keys.filter { isHeldBack($0) && awaitsSelection($0) }.sorted { $0.uuidString < $1.uuidString }
+    }
+
     /// The Server tab's "Ask before sending unblurred scans", and the consent's Always Send (off).
     func setHoldsBackFilterOff(_ on: Bool) {
         guard on != holdsBackFilterOff else { return }

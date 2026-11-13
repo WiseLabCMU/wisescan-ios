@@ -912,6 +912,9 @@ struct ScanCard: View {
     @State private var exportPhase: ExportPhase?
     /// DECISION 3 hard gate: Share requires this scan post-processed.
     @State private var showPostprocessAlert = false
+    /// Captured with the Privacy Filter off and not filtered since: offers Apply Privacy Filter.
+    @State private var isUnfiltered = false
+    @State private var confirmApplyPrivacy = false
     /// Focus scans: the photo viewer (in place of the mesh preview), and the room scan the
     /// capture relocalized into, shown small beside the photo.
     @State private var showFocusPhotos = false
@@ -1086,6 +1089,14 @@ struct ScanCard: View {
             itemCounts = resolved.counts
             isRelocMissing = resolved.relocMissing
             sizeMB = resolved.sizeMB
+            // The offer sits in the Color menu, which a focus scan doesn't have (it is filtered
+            // from the Server tab or the send dialog instead).
+            if !scan.isFocusScan {
+                let record = PrivacyFilterReapply.record(for: scan)
+                isUnfiltered = await Task.detached(priority: .utility) {
+                    PrivacyFilterReapply.isUnfiltered(record: record)
+                }.value
+            }
         }
         // Load the preview as a downsampled, cached thumbnail. Keyed on the location's
         // updatedAt so it refreshes after (re)coloring rewrites model_preview.jpg.
@@ -1386,6 +1397,12 @@ struct ScanCard: View {
                             Label("Redo 360° Calibration", systemImage: "arrow.triangle.2.circlepath")
                         })
                     }
+                    // Only on a scan captured with the Privacy Filter off (PrivacyFilterReapply).
+                    if isUnfiltered {
+                        Button(action: { confirmApplyPrivacy = true }, label: {
+                            Label("Apply Privacy Filter", systemImage: "eye.slash")
+                        })
+                    }
                 } label: {
                     processButtonLabel(disabled: processDisabled)
                 } primaryAction: {
@@ -1393,6 +1410,14 @@ struct ScanCard: View {
                 }
                 .disabled(processDisabled)
             }
+        }
+        .alert("Apply the Privacy Filter?", isPresented: $confirmApplyPrivacy) {
+            Button("Apply") { applyPrivacyFilter() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("People will be blurred in this scan's photos and kept out of its mesh colors. "
+                 + "It is processed again on this device and, if its space syncs, sent again blurred. "
+                 + "The original photos stay on this device. This can't be undone.")
         }
         .alert("Post-process Required", isPresented: $showPostprocessAlert) {
             Button("Post-process Now") { reRunProcessing() }
@@ -1442,6 +1467,22 @@ struct ScanCard: View {
         ScanPostprocessor.run(
             scans: [scan],
             colorize: true,
+            modelContext: modelContext,
+            progress: { _, msg in coloringMessage = msg ?? coloringMessage },
+            completion: {
+                coloringMessage = nil
+                onUpdate(scan)
+            }
+        )
+    }
+
+    /// Applies the Privacy Filter to this scan captured with it off (PrivacyFilterReapply): its
+    /// masks and recolor run as Process steps, with the card's processing line.
+    private func applyPrivacyFilter() {
+        isUnfiltered = false
+        coloringMessage = "Applying privacy filter…"
+        PrivacyFilterReapply.apply(
+            to: [scan],
             modelContext: modelContext,
             progress: { _, msg in coloringMessage = msg ?? coloringMessage },
             completion: {
