@@ -107,13 +107,17 @@ class FrameCaptureSession {
     /// Whether the current armed request has already fired its keyframe. Prevents a
     /// single tap from firing twice while its hi-res completion is outstanding.
     private var hasStillnessKeyframe: Bool = false
-    /// Armed by the shutter tap (`requestStillCapture`) — stills NEVER fire
-    /// automatically. The armed request fires on the next capture tick while
-    /// stillness holds, auto-retries blurred results, and cancels when stillness
-    /// breaks before it fires. Main-thread only (tap + capture timer are both main).
+    /// Armed by the shutter tap (`requestStillCapture`). The tap itself wobbles the device, so
+    /// it restarts stillness: the request fires once the device has settled again after the tap,
+    /// auto-retries blurred results, and is cancelled if the device hasn't settled within
+    /// `AppConstants.tapSettleTimeoutSeconds`. Main-thread only (tap + capture timer are both main).
     private var stillCaptureRequested: Bool = false
-    /// UI state: a tapped request is armed or in flight (reticle shows "Capturing…").
+    /// UI state: a tapped request is armed or in flight (the reticle shows "Hold still…" until
+    /// the device settles, then "Capturing…").
     private(set) var isStillCapturePending: Bool = false
+    /// Taps cancelled because the device never settled in time; the capture view answers each with
+    /// a warning haptic and a message.
+    private(set) var tapSettleTimeoutCount = 0
     /// Number of frames captured while device was confirmed still (high confidence sharp).
     private(set) var sharpFrameCount: Int = 0
     /// Total frames captured this session (sharp + sweep).
@@ -182,10 +186,13 @@ class FrameCaptureSession {
     /// frames were saved: re-anchored only once the camera moves past the overlap threshold, so
     /// a held pose averages sway out instead of judging every 0.1 s tick on its own.
     @ObservationIgnored private var stillnessBase: (transform: simd_float4x4, time: TimeInterval)?
-    /// The hi-res still in flight is an automatic one; a rig tap arriving meanwhile adopts it as
-    /// the tap's phone still instead of being refused.
-    @ObservationIgnored private var hiResInFlightAutomatic = false
-    @ObservationIgnored private var adoptInFlightStillForTap = false
+    /// Set by a rig tap: the next capture tick restarts stillness from its pose.
+    @ObservationIgnored private var restartStillnessForTap = false
+    /// Frame time the armed tap began waiting to settle (-1 = none); its timeout runs from here.
+    @ObservationIgnored private var tapSettleStartedAt: TimeInterval = -1
+    /// The armed tap's companion (the 360° still), run once when the tap fires. Cleared with the
+    /// request and when recording ends, so it never outlives the tap that set it.
+    @ObservationIgnored private var tapCompanion: (() -> Void)?
     /// No automatic still before this (seconds since boot, the ARFrame clock).
     @ObservationIgnored private var autoStillBackoffUntil: TimeInterval = -1
     /// Read by the metadata writer on the I/O queue, so behind a lock.
@@ -223,12 +230,16 @@ class FrameCaptureSession {
     /// updates mesh anchors' photo-covered state (amber → clear).
     @ObservationIgnored var onKeyframeCaptured: ((KeyframeStill) -> Void)?
 
-    /// Arms a still capture from the shutter tap — the deterministic trigger (stills
-    /// never fire on their own). Returns false when the device isn't confirmed still,
-    /// so the UI can nudge "hold still". Main thread.
+    /// Arms a still capture from the shutter tap, the rig's deterministic trigger. The tap itself
+    /// wobbles the device, so it restarts stillness: the request fires once the device has settled
+    /// again after the tap (the reticle's ring refills), and `onFire` (the 360° still) runs at that
+    /// moment, from the settled pose. A tap that hasn't settled within
+    /// `AppConstants.tapSettleTimeoutSeconds` is cancelled (`tapSettleTimeoutCount`). Returns
+    /// false, for a warning haptic, while a tap is already armed or in flight, or when this
+    /// stillness pause has already given its still. Main thread.
     @discardableResult
-    func requestStillCapture() -> Bool {
-        guard !captureEnded, isCurrentlyStill else { return false }
+    func requestStillCapture(onFire: (() -> Void)? = nil) -> Bool {
+        guard !captureEnded else { return false }
         // ONE STILL PER STILLNESS PAUSE: refuse the tap (warning haptic at the call site)
         // while a request is armed, its hi-res completion/encode is outstanding, OR this
         // pause has already delivered its keyframe (`hasStillnessKeyframe` latches until
@@ -238,19 +249,15 @@ class FrameCaptureSession {
         // cycle sustains the hi-res encode load behind the mid-scan starvation class
         // (triage item 3). To deliberately re-shoot a spot: move slightly and settle again.
         guard !isStillCapturePending, !hasStillnessKeyframe else { return false }
-        if hiResCaptureInFlight {
-            // An automatic still already on its way from this pause becomes the tap's phone still
-            // (its completion gives the tap's feedback); any other in-flight still refuses the tap.
-            guard hiResInFlightAutomatic, !adoptInFlightStillForTap else { return false }
-            adoptInFlightStillForTap = true
-            hasStillnessKeyframe = true
-            stillCaptureRequested = true
-            isStillCapturePending = true
-            keyframeRetryCount = 0
-            return true
-        }
         stillCaptureRequested = true
         isStillCapturePending = true
+        restartStillnessForTap = true
+        tapSettleStartedAt = -1
+        tapCompanion = onFire
+        // Show the restart now ("Hold still…", empty ring) rather than at the next tick; settling
+        // again then plays the stillness chime, the cue that the shot is about to fire.
+        isCurrentlyStill = false
+        stillnessProgress = 0
         // Fresh blur-retry allowance for this tap (failure paths manage their own re-arms).
         keyframeRetryCount = 0
         return true
@@ -259,6 +266,9 @@ class FrameCaptureSession {
     /// Clears a tap-armed request (stillness broke, save landed, or capture reset).
     private func clearStillCaptureRequest() {
         stillCaptureRequested = false
+        restartStillnessForTap = false
+        tapSettleStartedAt = -1
+        tapCompanion = nil
         if isStillCapturePending { isStillCapturePending = false }
     }
 
@@ -503,8 +513,10 @@ class FrameCaptureSession {
         lastStillTimestamp = -1
         lastAutoRequestTimestamp = -1
         stillnessBase = nil
-        hiResInFlightAutomatic = false
-        adoptInFlightStillForTap = false
+        restartStillnessForTap = false
+        tapSettleStartedAt = -1
+        tapCompanion = nil
+        tapSettleTimeoutCount = 0
         autoStillBackoffUntil = -1
         autoStillStats.withLock { $0 = AutoStillStats() }
         gyroHistory.withLock { $0 = ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity) }
@@ -772,6 +784,16 @@ class FrameCaptureSession {
             lastTickTimestamp = frameTimestamp
             if recordingStartTimestamp < 0 { recordingStartTimestamp = frameTimestamp }
         }
+        // A rig tap restarts stillness from this tick's pose: the tap itself wobbles the device,
+        // and the held-pose baseline below would average a brief jolt away. A fresh baseline
+        // sees it, and the confirmation window starts over, so the tap fires only once the device
+        // has settled again (the reticle's ring empties and refills).
+        if restartStillnessForTap {
+            restartStillnessForTap = false
+            if autoStillsActive { stillnessBase = (transform: transform, time: frameTimestamp) }
+            stillnessStartTime = nil
+            tapSettleStartedAt = frameTimestamp
+        }
         // Stillness and the motion warning keep their old baseline semantics (see stillnessBase);
         // the automatic stills' blur gate uses the tick (`previousTick`) plus the gyro.
         let motionBase: (transform: simd_float4x4, time: TimeInterval)? = autoStillsActive
@@ -857,6 +879,17 @@ class FrameCaptureSession {
         // detail than the video stream. After repeated hi-res failures, keyframes fall
         // back to saving the stream frame (pre-hi-res behavior).
         var isStillnessKeyframe = false
+        if stillCaptureRequested, !hasStillnessKeyframe, tapSettleStartedAt >= 0,
+           frameTimestamp - tapSettleStartedAt > AppConstants.tapSettleTimeoutSeconds {
+            // The device never settled after the tap: drop it rather than fire much later at a
+            // pose the operator has moved on from.
+            if PerfDiag.enabled {
+                PerfDiag.log(String(format: "[RigTap] no still: not settled %.0f s after the tap",
+                                    AppConstants.tapSettleTimeoutSeconds))
+            }
+            clearStillCaptureRequest()
+            tapSettleTimeoutCount += 1
+        }
         if confirmedStill && stillCaptureRequested && !isMockingIMU {
             if hasStillnessKeyframe {
                 return // this tap's request already fired; suppress jitter saves meanwhile
@@ -872,6 +905,7 @@ class FrameCaptureSession {
                     hasStillnessKeyframe = true
                     hiResRequestTime = frameTimestamp
                     requestHighResolutionKeyframe(from: session)
+                    noteTapFiring(at: frameTimestamp)
                 } else if let requested = hiResRequestTime,
                           frameTimestamp - requested > AppConstants.hiResCaptureTimeoutSeconds {
                     // Watchdog: the completion never arrived (a session interruption can
@@ -889,6 +923,7 @@ class FrameCaptureSession {
             // Hi-res unavailable — fall through and save the stream frame as the keyframe.
             hasStillnessKeyframe = true
             isStillnessKeyframe = true
+            noteTapFiring(at: frameTimestamp)
         }
 
         // A room scan with automatic stills saves stills only (plus the rig's tap-armed still
@@ -957,11 +992,13 @@ class FrameCaptureSession {
             stillnessStartTime = frameTimestamp
         } else if !isStill {
             stillnessStartTime = nil
+            let firedThisPause = hasStillnessKeyframe
             hasStillnessKeyframe = false // reset so the next tap gets a fresh keyframe
             keyframeRetryCount = 0       // fresh blurred-still retry budget for the next tap
-            // Stillness broke before an armed tap fired — cancel it (the user moved
-            // away; capturing at the new pose would not be what they framed).
-            clearStillCaptureRequest()
+            // A tap that hasn't fired keeps waiting through motion (the tap itself breaks
+            // stillness); its timeout cancels it. One that fired is done with this pause: a
+            // blurred result is not retried at a new pose.
+            if firedThisPause { clearStillCaptureRequest() }
         }
         let wasStill = isCurrentlyStill
         let confirmedStill = isStill && (frameTimestamp - (stillnessStartTime ?? frameTimestamp)) >= AppConstants.stillnessDurationRequired
@@ -998,7 +1035,9 @@ class FrameCaptureSession {
         guard !captureEnded, frame.camera.trackingState == .normal else { return }
         // On the 360° rig a held pause belongs to the tap (phone + 360° pair), not to the
         // automatic stills.
-        guard !(confirmedStill && rigLeverArmMeters != nil) else { return }
+        // So does the wait after a tap: an automatic still taken mid-wobble would be wasted, and
+        // its encode would hold up the tap's own still.
+        guard rigLeverArmMeters == nil || !(confirmedStill || stillCaptureRequested) else { return }
         let t = frame.timestamp
         guard recordingStartTimestamp >= 0, t - recordingStartTimestamp >= AppConstants.roomStillWarmupSeconds,
               t >= autoStillBackoffUntil else { return }
@@ -1008,7 +1047,6 @@ class FrameCaptureSession {
             guard let requested = hiResRequestTime, t - requested > AppConstants.hiResCaptureTimeoutSeconds else { return }
             print("[FrameCapture] Automatic still timed out after \(Int(AppConstants.hiResCaptureTimeoutSeconds))s — re-arming")
             hiResCaptureInFlight = false
-            adoptInFlightStillForTap = false
         }
         let hot = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
         let minInterval = hot ? AppConstants.roomStillHotMinIntervalSeconds : AppConstants.roomStillMinIntervalSeconds
@@ -1090,8 +1128,23 @@ class FrameCaptureSession {
         }
     }
 
+    /// The armed tap is firing: run its companion (the 360° still) once, at the settled pose, and
+    /// log how long the device took to settle after the tap.
+    private func noteTapFiring(at frameTimestamp: TimeInterval) {
+        guard let companion = tapCompanion else { return }
+        tapCompanion = nil
+        if PerfDiag.enabled, tapSettleStartedAt >= 0 {
+            let window = AppConstants.stillnessDurationRequired
+            let peak = gyroHistory.withLock { $0.peak(window: window) }
+            PerfDiag.log(String(format: "[RigTap] settled %.2f s after the tap (gyro peak %.3f rad/s over the last %.1f s)",
+                                frameTimestamp - tapSettleStartedAt, peak, window))
+        }
+        companion()
+    }
+
     /// Recording over: gyro off, the camera's exposure limit back to its default, timing stopped.
     private func endAutoStills() {
+        tapCompanion = nil
         motion?.stopGyroUpdates()
         delegateWorkMeter.end()
         if autoStillsActive {
@@ -1138,15 +1191,12 @@ class FrameCaptureSession {
     /// automatic stills off for `roomStillBackoffSeconds`).
     private func requestHighResolutionKeyframe(from session: ARSession, automatic: Bool = false) {
         hiResCaptureInFlight = true
-        hiResInFlightAutomatic = automatic
-        adoptInFlightStillForTap = false
         session.captureHighResolutionFrame { [weak self] frame, error in
             guard let self = self else { return }
 
             guard let frame = frame, error == nil else {
                 DispatchQueue.main.async {
                     self.hiResCaptureInFlight = false
-                    self.adoptInFlightStillForTap = false
                     self.hiResFailureCount += 1
                     print("[FrameCapture] Hi-res capture failed (\(error?.localizedDescription ?? "nil frame")) — attempt \(self.hiResFailureCount)/\(AppConstants.hiResMaxFailures)")
                     // Transient failures happen (session interruptions, RoomPlan
@@ -1205,7 +1255,6 @@ class FrameCaptureSession {
                 DispatchQueue.main.async {
                     guard !self.captureEnded else {
                         self.hiResCaptureInFlight = false
-                        self.adoptInFlightStillForTap = false
                         return
                     }
                     if sharpness < AppConstants.keyframeSharpnessFloor,
@@ -1214,7 +1263,6 @@ class FrameCaptureSession {
                         // (bounded). No shutter feedback for a rejected still.
                         self.keyframeRetryCount += 1
                         self.hiResCaptureInFlight = false
-                        self.adoptInFlightStillForTap = false
                         self.hasStillnessKeyframe = false
                         print("[FrameCapture] Keyframe below sharpness floor (\(String(format: "%.0f", sharpness)) < \(String(format: "%.0f", AppConstants.keyframeSharpnessFloor))) — retry \(self.keyframeRetryCount)/\(AppConstants.keyframeMaxRetries)")
                         return
@@ -1243,7 +1291,6 @@ class FrameCaptureSession {
                             print("[FrameCapture] Hi-res keyframe JPEG encode failed — dropping")
                             DispatchQueue.main.async {
                                 self.hiResCaptureInFlight = false
-                                self.adoptInFlightStillForTap = false
                                 self.hasStillnessKeyframe = false // let the stillness period retry
                             }
                             return
@@ -1251,9 +1298,6 @@ class FrameCaptureSession {
 
                         DispatchQueue.main.async {
                             self.hiResCaptureInFlight = false
-                            // An automatic still a rig tap adopted gives the tap's feedback.
-                            let adoptedByTap = self.adoptInFlightStillForTap
-                            self.adoptInFlightStillForTap = false
                             self.hiResFailureCount = 0
                             // Recording may have stopped while the encode ran — the metadata
                             // writers have already run, so a late save would write an orphan
@@ -1279,7 +1323,7 @@ class FrameCaptureSession {
                             // the save pipeline — a backlog drop re-arms the stillness period instead.
                             if admitted {
                                 self.noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH,
-                                                       depthMap: depthMap, feedback: !automatic || adoptedByTap)
+                                                       depthMap: depthMap, feedback: !automatic)
                             } else {
                                 self.hasStillnessKeyframe = false
                             }

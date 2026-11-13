@@ -142,8 +142,9 @@ struct UserGuideView: View {
                               "enough and the view has changed since the last one; the amber overlay " +
                               "clears where photos land. Slow down over amber areas and step sideways " +
                               "now and then so surfaces are seen from more than one spot. With a 360° " +
-                              "camera connected, tapping the screen while holding still takes a 360° " +
-                              "still and a matching phone photo. The screen flashes briefly for every " +
+                              "camera connected, tapping the screen takes a 360° still and a matching " +
+                              "phone photo once the rig has settled again after the tap (the ring " +
+                              "refills while it shows Hold still). The screen flashes briefly for every " +
                               "photo kept, so you can follow along with the sound off; the screen stays " +
                               "on while you record. In the mesh preview, the camera toggle " +
                               "shows where each photo was captured."
