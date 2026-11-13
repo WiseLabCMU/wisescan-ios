@@ -23,7 +23,8 @@ struct UserGuideView: View {
                         text: "Point your device at a scene. The Privacy Filter (on by default) masks " +
                               "people out of the captured data. Switched off, it turns itself back on " +
                               "24 hours later, so a switch left off by mistake doesn't keep capturing " +
-                              "people. Tap the capture button to start recording — " +
+                              "people. A scan captured with it off can be blurred later: Apply Privacy " +
+                              "Filter, in its Color button's long-press menu. Tap the capture button to start recording — " +
                               "the mesh overlay shows scanning progress in real-time, and coaching tips " +
                               "appear when the scan needs attention (moving too fast, session near capacity). " +
                               "The overlay color tells you what each area still needs: green = not yet " +
@@ -108,7 +109,8 @@ struct UserGuideView: View {
                               "you turn that off, and the Server tab lists the ones waiting, where you choose " +
                               "which go. All are selected, except a scan captured with the Privacy " +
                               "Filter off: its photos show people unblurred, so it waits until you select " +
-                              "it (Select on its card does it too, after asking; Always Send stops the asking). No bundle is prepared during a scan or while you Share. A cloud on each space shows " +
+                              "it (Select on its card does it too, after asking once for all such scans: Blur, " +
+                              "Then Send blurs them first, and Always Send Unblurred stops the asking). No bundle is prepared during a scan or while you Share. A cloud on each space shows " +
                               "what the server has: an outline for its map, a green check for everything, " +
                               "an arrow while a bundle goes up (Troubleshooting, below, explains every " +
                               "badge). If the server wants its password, Sync asks for it first, then " +

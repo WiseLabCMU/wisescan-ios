@@ -17,6 +17,7 @@ struct ServerView: View {
                 ServerStatusSection()
                 if ControlPlaneClient.baseURL(fromHost: host) != nil {
                     PendingBundlesSections(locations: locations)
+                    UnblurredScansSection(locations: locations)
                 }
                 ControlPlaneSettingsSection()
             }
@@ -25,6 +26,68 @@ struct ServerView: View {
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Scan4D Server")
         }
+    }
+}
+
+/// Scans captured with the Privacy Filter off that this phone has reported to the server (as the
+/// last sync read them, `BundleSync.filterOff`), whether the server holds them yet or not: Blur All
+/// applies the filter to every one (`PrivacyFilterReapply`), and each is sent again blurred,
+/// replacing the server's copy. Shown only while there are any, so it costs nothing to the many
+/// who never turn the filter off.
+private struct UnblurredScansSection: View {
+    let locations: [ScanLocation]
+    @Environment(\.modelContext) private var modelContext
+    @State private var confirm = false
+    @State private var running: (done: Int, of: Int)?
+
+    var body: some View {
+        let filterOff = BundleSync.shared.filterOff
+        let scans = locations.flatMap(\.scans).filter { filterOff.contains($0.id) }
+        if !scans.isEmpty || running != nil {
+            Section {
+                HStack {
+                    // While Blur All runs the scans are no longer counted as unblurred; say what is happening.
+                    Label(running != nil ? "Applying the Privacy Filter"
+                          : scans.count == 1 ? "1 scan has people unblurred" : "\(scans.count) scans have people unblurred",
+                          systemImage: "eye.trianglebadge.exclamationmark")
+                    Spacer()
+                    if let running {
+                        ProgressView()
+                        Text("\(running.done)/\(running.of)").font(.caption).monospacedDigit()
+                    } else {
+                        Button("Blur All…") { confirm = true }
+                            .buttonStyle(.borderless)
+                    }
+                }
+            } footer: {
+                Text("Captured with the Privacy Filter off. Blur All applies the filter to them: each is processed "
+                     + "again on this device and sent again with people blurred, replacing the server's copy.")
+            }
+            .listRowBackground(Color.white.opacity(0.05))
+            .alert(scans.count == 1 ? "Apply the Privacy Filter to 1 scan?" : "Apply the Privacy Filter to \(scans.count) scans?",
+                   isPresented: $confirm) {
+                Button("Blur All") { blurAll(scans) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("People will be blurred in their photos and kept out of their mesh colors, and the server's "
+                     + "copies replaced as each is sent again. Processing takes a while for large scans. The "
+                     + "original photos stay on this device. This can't be undone.")
+            }
+        }
+    }
+
+    private func blurAll(_ scans: [CapturedScan]) {
+        let rooms = scans.filter { !$0.isFocusScan }.count
+        running = (0, rooms)
+        PrivacyFilterReapply.apply(
+            to: scans,
+            modelContext: modelContext,
+            progress: { _, message in
+                // nil: done with that scan (Process can pull in a space's original too, hence the cap).
+                if message == nil, let current = running { running = (min(current.done + 1, current.of), current.of) }
+            },
+            completion: { running = nil }
+        )
     }
 }
 

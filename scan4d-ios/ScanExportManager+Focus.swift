@@ -144,29 +144,46 @@ enum FocusStillPrivacy {
     private static let context = CIContext(options: [.useSoftwareRenderer: false])
 
     static func process(jpeg data: Data) -> Outcome {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return .failed("decode failed") }
+        switch sensorPersonMask(jpeg: data) {
+        case .failure(let error):
+            return .failed(error.message)
+        case .success(nil):
+            return .clean
+        case .success(let sensorMask?):
+            guard let blurred = pixelate(jpeg: data, mask: sensorMask) else { return .failed("blur render failed") }
+            return .blurred(blurred, sensorMask)
+        }
+    }
+
+    /// The person mask of a sensor-landscape still in sensor orientation (8-bit gray, people
+    /// white), or nil when Vision finds no person. Vision runs on a small upright copy (see the
+    /// type's note). Shared with the masks a room scan gets when the Privacy Filter is applied
+    /// after capture (`PrivacyFilterReapply`), whose frames come from the same portrait capture.
+    static func sensorPersonMask(jpeg data: Data) -> Result<CGImage?, EquirectPrivacyBlur.StringError> {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return .failure(.init("decode failed"))
+        }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: AppConstants.focusPrivacyWorkingMaxPixel,
             kCGImageSourceCreateThumbnailWithTransform: false
         ]
         guard let working = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return .failed("working decode failed")
+            return .failure(.init("working decode failed"))
         }
         // Sensor landscape to the portrait the operator held: the capture view's fixed map.
         let upright = CIImage(cgImage: working).oriented(.right)
         guard let uprightImage = context.createCGImage(upright, from: upright.extent) else {
-            return .failed("upright render failed")
+            return .failure(.init("upright render failed"))
         }
         switch EquirectPrivacyBlur.personMask(for: uprightImage) {
         case .failure(let error):
-            return .failed(error.message)
+            return .failure(error)
         case .success(nil):
-            return .clean
+            return .success(nil)
         case .success(let mask?):
-            guard let sensorMask = sensorOrientationMask(mask) else { return .failed("mask rotation failed") }
-            guard let blurred = pixelate(jpeg: data, mask: sensorMask) else { return .failed("blur render failed") }
-            return .blurred(blurred, sensorMask)
+            guard let sensorMask = sensorOrientationMask(mask) else { return .failure(.init("mask rotation failed")) }
+            return .success(sensorMask)
         }
     }
 
