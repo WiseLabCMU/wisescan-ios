@@ -144,7 +144,9 @@ struct UserGuideView: View {
                               "now and then so surfaces are seen from more than one spot. With a 360° " +
                               "camera connected, tapping the screen takes a 360° still and a matching " +
                               "phone photo once the rig has settled again after the tap (the ring " +
-                              "refills while it shows Hold still). The screen flashes briefly for every " +
+                              "refills while it shows Hold still). The rig also takes one on its own " +
+                              "when you hold still for about a second at a new spot, 2 m from the last " +
+                              "(the floor rings show where). The screen flashes briefly for every " +
                               "photo kept, so you can follow along with the sound off; the screen stays " +
                               "on while you record. In the mesh preview, the camera toggle " +
                               "shows where each photo was captured."

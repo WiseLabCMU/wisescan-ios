@@ -33,6 +33,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.colorizeFrom360Faces) private var colorizeFrom360Faces: Bool = AppConstants.colorizeFrom360Faces
     @AppStorage(AppConstants.Key.keepCameraOriginals) private var keepCameraOriginals: Bool = AppConstants.keepCameraOriginals
+    @AppStorage(AppConstants.Key.rigAutoStills) private var rigAutoStills: Bool = AppConstants.rigAutoStills
     @AppStorage(AppConstants.Key.privacyFilterTimeLimitHours) private var privacyFilterTimeLimitHours: Int = AppConstants.privacyFilterTimeLimitHours
     @AppStorage(AppConstants.Key.gpuColorize) private var gpuColorize: Bool = AppConstants.gpuColorize
     @AppStorage(AppConstants.Key.keyframeWeightBonus) private var keyframeWeightBonus: Bool = AppConstants.keyframeWeightBonus
@@ -187,6 +188,8 @@ struct SettingsView: View {
     private var developerPrivacySection: some View {
         devSection("PRIVACY & 360° CAMERA", icon: "hand.raised.fill") {
             privacyTimeLimitPicker
+            devToggle($rigAutoStills, "Automatic 360° Stills",
+                      "On the 360° rig, take a 360° still and its phone photo whenever the rig has held still for about a second at a spot 2 m from every earlier one (the floor rings). Off: 360° stills only when you tap. A tap adds one anywhere either way.")
             devToggle($keepCameraOriginals, "Keep 360° Originals on Camera",
                       "Debugging only: skips the security sweep that deletes each 360° still from the camera once its bytes are verified on the device. Raw equirects capture bystanders in every direction, and the camera's open access point with factory password is the weakest place to leave them — keep this OFF except when comparing against camera-side originals.")
         }

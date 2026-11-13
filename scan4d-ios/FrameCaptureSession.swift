@@ -193,6 +193,15 @@ class FrameCaptureSession {
     /// The armed tap's companion (the 360° still), run once when the tap fires. Cleared with the
     /// request and when recording ends, so it never outlives the tap that set it.
     @ObservationIgnored private var tapCompanion: (() -> Void)?
+    /// Automatic 360° stills (rig only): asked, with the phone's pose, once the rig has held still
+    /// `AppConstants.rigAutoStillHoldSeconds` past confirmation in a pause that hasn't given a
+    /// still yet. Returns the 360° trigger to fire with a phone still there, or nil when this spot
+    /// doesn't get one; the capture view decides (the switch, the camera free, 2 m from earlier
+    /// 360° stills). Cleared when recording ends.
+    @ObservationIgnored var rigAutoStillTrigger: ((simd_float4x4) -> (() -> Void)?)?
+    /// The armed request is an automatic 360° still, not a tap: a stillness break cancels it
+    /// (it was for the spot the rig held), where a tap keeps waiting for the next settle.
+    @ObservationIgnored private var armedAutomatically = false
     /// No automatic still before this (seconds since boot, the ARFrame clock).
     @ObservationIgnored private var autoStillBackoffUntil: TimeInterval = -1
     /// Read by the metadata writer on the I/O queue, so behind a lock.
@@ -266,6 +275,7 @@ class FrameCaptureSession {
     /// Clears a tap-armed request (stillness broke, save landed, or capture reset).
     private func clearStillCaptureRequest() {
         stillCaptureRequested = false
+        armedAutomatically = false
         restartStillnessForTap = false
         tapSettleStartedAt = -1
         tapCompanion = nil
@@ -517,6 +527,7 @@ class FrameCaptureSession {
         tapSettleStartedAt = -1
         tapCompanion = nil
         tapSettleTimeoutCount = 0
+        armedAutomatically = false
         autoStillBackoffUntil = -1
         autoStillStats.withLock { $0 = AutoStillStats() }
         gyroHistory.withLock { $0 = ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity) }
@@ -890,6 +901,28 @@ class FrameCaptureSession {
             clearStillCaptureRequest()
             tapSettleTimeoutCount += 1
         }
+        // ── Automatic 360° still (rig) ──
+        // A deliberate pause rather than a tap: once the rig has held still past confirmation,
+        // ask the capture view whether this spot gets a 360° still. If it does, arm it like a tap
+        // that has already settled (there is no tap wobble to wait out), so the block below fires
+        // it on this tick: the phone still, with the 360° still as its companion.
+        if !isMockingIMU, let trigger = rigAutoStillTrigger,
+           Self.rigAutoStillDue(confirmedStill: confirmedStill, isRig: rigLeverArmMeters != nil,
+                                requestArmed: stillCaptureRequested, pauseDelivered: hasStillnessKeyframe,
+                                heldFor: stillnessStartTime.map { frameTimestamp - $0 } ?? 0,
+                                sinceRecordingStart: recordingStartTimestamp >= 0 ? frameTimestamp - recordingStartTimestamp : nil),
+           let companion = trigger(transform) {
+            stillCaptureRequested = true
+            isStillCapturePending = true
+            armedAutomatically = true
+            tapCompanion = companion
+            tapSettleStartedAt = -1
+            keyframeRetryCount = 0
+            if PerfDiag.enabled {
+                PerfDiag.log(String(format: "[RigAuto] 360° still: held still %.1f s",
+                                    frameTimestamp - (stillnessStartTime ?? frameTimestamp)))
+            }
+        }
         if confirmedStill && stillCaptureRequested && !isMockingIMU {
             if hasStillnessKeyframe {
                 return // this tap's request already fired; suppress jitter saves meanwhile
@@ -997,8 +1030,9 @@ class FrameCaptureSession {
             keyframeRetryCount = 0       // fresh blurred-still retry budget for the next tap
             // A tap that hasn't fired keeps waiting through motion (the tap itself breaks
             // stillness); its timeout cancels it. One that fired is done with this pause: a
-            // blurred result is not retried at a new pose.
-            if firedThisPause { clearStillCaptureRequest() }
+            // blurred result is not retried at a new pose. An automatic 360° still was for the
+            // spot the rig held, so it goes with the pause either way.
+            if firedThisPause || armedAutomatically { clearStillCaptureRequest() }
         }
         let wasStill = isCurrentlyStill
         let confirmedStill = isStill && (frameTimestamp - (stillnessStartTime ?? frameTimestamp)) >= AppConstants.stillnessDurationRequired
@@ -1128,6 +1162,17 @@ class FrameCaptureSession {
         }
     }
 
+    /// Whether to ask for an automatic 360° still this tick: on the rig, confirmed still for
+    /// `rigAutoStillHoldSeconds` past the confirmation window, after the warm-up, with no tap
+    /// armed and no still from this pause yet. The capture view then decides on the spot itself.
+    static func rigAutoStillDue(confirmedStill: Bool, isRig: Bool, requestArmed: Bool,
+                                pauseDelivered: Bool, heldFor: TimeInterval,
+                                sinceRecordingStart: TimeInterval?) -> Bool {
+        guard confirmedStill, isRig, !requestArmed, !pauseDelivered,
+              let sinceRecordingStart, sinceRecordingStart >= AppConstants.roomStillWarmupSeconds else { return false }
+        return heldFor >= AppConstants.stillnessDurationRequired + AppConstants.rigAutoStillHoldSeconds
+    }
+
     /// The armed tap is firing: run its companion (the 360° still) once, at the settled pose, and
     /// log how long the device took to settle after the tap.
     private func noteTapFiring(at frameTimestamp: TimeInterval) {
@@ -1145,6 +1190,7 @@ class FrameCaptureSession {
     /// Recording over: gyro off, the camera's exposure limit back to its default, timing stopped.
     private func endAutoStills() {
         tapCompanion = nil
+        rigAutoStillTrigger = nil
         motion?.stopGyroUpdates()
         delegateWorkMeter.end()
         if autoStillsActive {

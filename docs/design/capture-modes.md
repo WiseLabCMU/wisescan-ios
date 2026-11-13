@@ -38,7 +38,8 @@ rescan does today, then diverge at Start.
 3. Detail levels MVP: Check, Detail, Splat (table below). Tune later.
 4. The room scan drops video-stream images entirely. Stills fire automatically at 12MP; the
    stream-frame path stays only as the fallback when stills keep failing.
-5. The screen tap fires the 360° camera only, and only with a rig connected.
+5. The screen tap fires the 360° camera only, and only with a rig connected. The rig also fires
+   on its own at each deliberate pause 2 m from earlier 360° stills (below).
 6. Privacy blur for focus stills runs at export, like every other capture source. With nothing
    filtered during capture, the toggle stays live through a focus scan and its value at Stop counts.
 7. Regions are not catalogued yet. A focus scan carries its own region; scans of the same table
@@ -134,6 +135,12 @@ focus capture with the region loaded. Delivery from the server (polling) waits f
   360° still: the rig calibration needs the co-timed pair. The stillness reticle and chime follow.
   The tap itself wobbles the rig, so both fire only once the device has settled again after it
   (stillness restarts from the tap's pose; `tapSettleTimeoutSeconds` drops one that never settles).
+- **Automatic 360° stills.** On the rig, a pause fires a 360° still with its phone still once the
+  rig has held still `rigAutoStillHoldSeconds` (1 s) past confirmation, at a spot
+  `stillSpacingTargetMeters` (2 m) from every earlier 360° still, with the camera free. A 360°
+  still sees every direction, so spacing is the whole placement rule; the floor rings already draw
+  it, so they now show where the next one fires. No tap means no tap wobble. One per pause; the tap
+  still adds one anywhere; Developer Mode can switch the automatic ones off.
 - **Room-scan spacing** is 15° of turn or parallax, or 0.5 m walked, one request at most every 0.5 s (2 s when hot). On the rig, a held pause belongs to the tap (no automatic still while confirmed still or while a tap waits to settle), and a tap waits for an automatic still in flight to finish.
 - **The map's frame is a precondition.** The region and every focus still must be in the room
   scan's frame, so the session tracks whether it is in it (`Coordinator.inMapFrame`: relocalizing
